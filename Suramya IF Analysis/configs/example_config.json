@@ -1,0 +1,38 @@
+{
+  "experiment_name": "Example_DNA_Damage_Study",
+  "description": "Example configuration for DNA damage foci analysis",
+  "output_directory": "Suramya IF Analysis/results/example_study",
+  "conditions": [
+    {
+      "name": "Control",
+      "directory": "Suramya IF Analysis/data/raw/control",
+      "description": "Untreated control cells",
+      "channels": [
+        {
+          "name": "DAPI",
+          "type": "nuclear",
+          "purpose": "segmentation",
+          "quantify": false,
+          "nuclear_only": true,
+          "wavelength": "405nm"
+        },
+        {
+          "name": "gamma_H2AX",
+          "type": "nuclear",
+          "purpose": "quantification",
+          "quantify": true,
+          "nuclear_only": true,
+          "wavelength": "488nm"
+        }
+      ]
+    }
+  ],
+  "analysis_parameters": {
+    "cellpose_model": "cyto2",
+    "cell_diameter": 30,
+    "use_gpu": false,
+    "background_method": "mode",
+    "export_images": true,
+    "export_rois": true
+  }
+}

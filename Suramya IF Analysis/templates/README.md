@@ -1,0 +1,3 @@
+# Templates
+
+Reusable configuration templates
