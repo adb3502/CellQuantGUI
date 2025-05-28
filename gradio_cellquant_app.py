@@ -670,9 +670,6 @@ if __name__ == "__main__":
         share=False,            # Don't create public link
         auth=None,              # Add authentication if needed: auth=[("username", "password")]
         show_error=True,        # Show detailed errors
-        show_tips=False,        # Hide Gradio tips
-        enable_queue=True,      # Enable request queuing for multiple users
-        max_threads=10,         # Support multiple concurrent analyses
         favicon_path=None,      # Add custom favicon if desired
         app_kwargs={
             "docs_url": "/docs",  # FastAPI docs endpoint
