@@ -10,6 +10,7 @@ pyyaml>=6.0
 
 # Image processing
 opencv-python>=4.5.0
+tifffile>=2023.0.0  # Memory-mapped TIFF support
 
 # Machine learning & cell segmentation
 cellpose>=2.0.0
@@ -23,12 +24,12 @@ seaborn>=0.11.0
 scikit-learn>=1.0.0
 plotly>=5.0.0
 
-# 3D visualization
+# 3D visualization & ROI editing
 napari>=0.4.0
+pyqt5>=5.15.0  # Napari backend
 
-# Web dashboard capabilities
-dash>=2.0.0
-jupyter>=1.0.0
+# Web UI
+gradio>=4.0.0
 
 # Utility packages
 joblib>=1.1.0
