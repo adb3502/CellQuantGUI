@@ -1,0 +1,302 @@
+@import "tailwindcss";
+
+/* ══════════════════════════════════════════════════════════════
+   FONT IMPORTS — Two complete typographic identities
+   Light: Classical scientific publishing (serif-forward)
+   Dark: Contemporary instrument interface (geometric sans)
+   ══════════════════════════════════════════════════════════════ */
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400&family=Lato:wght@300;400;500;600;700&family=Inconsolata:wght@400;500;600&family=Outfit:wght@200;300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ══════════════════════════════════════════════════════════════
+   THEME: HISTOLOGY ATLAS (Light)
+   Inspired by classical scientific illustration plates —
+   warm parchment backgrounds, rich purple-rose accents,
+   serif typography, and offset card shadows that evoke
+   hand-printed specimen labels.
+   ══════════════════════════════════════════════════════════════ */
+:root {
+  --bg: #F9F6F0;
+  --bg-elevated: #FFFEFA;
+  --bg-hover: #F0EDE5;
+  --bg-sunken: #F2EEE6;
+  --text: #2C3E50;
+  --text-muted: #7F8C8D;
+  --text-faint: #A8A29E;
+  --accent: #6B5B95;
+  --accent-soft: rgba(107, 91, 149, 0.12);
+  --accent-hover: #5A4A84;
+  --accent-secondary: #D4A5A5;
+  --success: #45B7AA;
+  --success-soft: rgba(69, 183, 170, 0.15);
+  --warning: #E07A5F;
+  --warning-soft: rgba(224, 122, 95, 0.15);
+  --error: #C0392B;
+  --error-soft: rgba(192, 57, 43, 0.12);
+  --border: #E8E2D9;
+  --border-strong: #D5CBBA;
+
+  /* Typography stacks */
+  --font-display: 'Libre Baskerville', Georgia, 'Times New Roman', serif;
+  --font-body: 'Crimson Text', Georgia, serif;
+  --font-ui: 'Lato', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'Inconsolata', 'Courier New', monospace;
+
+  /* Elevation — offset shadows for that specimen-plate feel */
+  --shadow-card: 3px 3px 0 var(--accent-secondary);
+  --shadow-hover: 4px 4px 0 var(--accent-secondary);
+  --shadow-dropdown: 0 4px 12px rgba(44, 62, 80, 0.12);
+  --shadow-modal: 0 8px 32px rgba(44, 62, 80, 0.18);
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 9999px;
+
+  /* Transition */
+  --transition-theme: background 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+  --transition-fast: 0.15s ease;
+  --transition-med: 0.25s ease;
+
+  /* Sidebar */
+  --sidebar-width: 220px;
+  --sidebar-collapsed: 64px;
+  --header-height: 56px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   THEME: DEEP FOCUS (Dark)
+   Instrument-panel aesthetics — absolute black backgrounds,
+   warm amber accents (like fluorescence signals), geometric
+   sans-serif type, zero shadows, sharp edges.
+   ══════════════════════════════════════════════════════════════ */
+.dark {
+  --bg: #0D0D0D;
+  --bg-elevated: #1A1A1A;
+  --bg-hover: #252525;
+  --bg-sunken: #111111;
+  --text: #E8E8E8;
+  --text-muted: #888888;
+  --text-faint: #555555;
+  --accent: #F5A623;
+  --accent-soft: rgba(245, 166, 35, 0.15);
+  --accent-hover: #FFB940;
+  --accent-secondary: #F5A623;
+  --success: #7CB342;
+  --success-soft: rgba(124, 179, 66, 0.15);
+  --warning: #FFA726;
+  --warning-soft: rgba(255, 167, 38, 0.15);
+  --error: #EF5350;
+  --error-soft: rgba(239, 83, 80, 0.15);
+  --border: #2a2a2a;
+  --border-strong: #333333;
+
+  --font-display: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-ui: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  --shadow-card: none;
+  --shadow-hover: none;
+  --shadow-dropdown: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 8px 40px rgba(0, 0, 0, 0.6);
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   BASE RESET & GLOBALS
+   ══════════════════════════════════════════════════════════════ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  transition: var(--transition-theme);
+  overflow: hidden;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SCROLLBAR — Styled to match each theme
+   ══════════════════════════════════════════════════════════════ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-sunken);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) var(--bg-sunken);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   UTILITY CLASSES
+   ══════════════════════════════════════════════════════════════ */
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-body {
+  font-family: var(--font-body);
+}
+
+.font-ui {
+  font-family: var(--font-ui);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Section headers — two personalities */
+.section-header {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 16px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-header::before {
+  content: '\00A7';
+  color: var(--success);
+  font-size: 18px;
+}
+
+.dark .section-header {
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.dark .section-header::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+/* Stat cards */
+.stat-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  box-shadow: var(--shadow-card);
+  transition: var(--transition-theme);
+}
+
+.stat-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-hover);
+}
+
+.dark .stat-card {
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.dark .stat-card:hover {
+  transform: none;
+  background: var(--bg-hover);
+}
+
+/* Status badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge-success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.badge-warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.badge-error {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+.badge-accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Progress bar */
+.progress-track {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--success));
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.dark .progress-fill {
+  background: var(--accent);
+}
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
