@@ -154,7 +154,15 @@ export function maskTileUrl(
 	x: number,
 	y: number
 ): string {
-	return `${BASE}/masks/tile/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${z}/${x}/${y}.png`;
+	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/tile/${z}/${x}_${y}.png`;
+}
+
+export function maskTileUrlTemplate(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): string {
+	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/tile/{z}/{x}_{y}.png`;
 }
 
 export async function getCellAt(
@@ -163,8 +171,8 @@ export async function getCellAt(
 	baseName: string,
 	row: number,
 	col: number
-): Promise<CellInfo | null> {
-	return request(`/masks/cell-at/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${row}/${col}`);
+): Promise<{ cell_id: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/cell-at/${row}/${col}`);
 }
 
 export async function deleteCell(
@@ -172,10 +180,10 @@ export async function deleteCell(
 	condition: string,
 	baseName: string,
 	cellId: number
-): Promise<void> {
-	await request(`/masks/delete-cell`, {
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/delete-cell`, {
 		method: 'PUT',
-		body: JSON.stringify({ session_id: sessionId, condition, base_name: baseName, cell_id: cellId })
+		body: JSON.stringify({ cell_id: cellId })
 	});
 }
 
@@ -184,11 +192,19 @@ export async function mergeCells(
 	condition: string,
 	baseName: string,
 	cellIds: number[]
-): Promise<void> {
-	await request(`/masks/merge-cells`, {
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/merge-cells`, {
 		method: 'PUT',
-		body: JSON.stringify({ session_id: sessionId, condition, base_name: baseName, cell_ids: cellIds })
+		body: JSON.stringify({ cell_ids: cellIds })
 	});
+}
+
+export async function getMaskStats(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): Promise<{ n_cells: number; min_area: number; max_area: number; mean_area: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/stats`);
 }
 
 // ── Quantification ───────────────────────────────────────

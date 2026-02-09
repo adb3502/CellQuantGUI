@@ -3,7 +3,8 @@
 	 * Mask overlay tile layer for OpenLayers.
 	 * Adds an RGBA mask tile layer to an existing OL map.
 	 */
-	import { onMount, onDestroy } from 'svelte';
+	import { onDestroy } from 'svelte';
+	import { maskTileUrlTemplate } from '$api/client';
 
 	let {
 		map = null,
@@ -11,7 +12,8 @@
 		condition,
 		baseName,
 		visible = true,
-		opacity = 0.5
+		opacity = 0.5,
+		refreshKey = 0
 	}: {
 		map?: any;
 		sessionId: string;
@@ -19,18 +21,22 @@
 		baseName: string;
 		visible?: boolean;
 		opacity?: number;
+		refreshKey?: number;
 	} = $props();
 
 	let layer: any = null;
 
 	$effect(() => {
-		if (!map) return;
+		if (!map || !sessionId || !condition || !baseName) return;
+
+		// Force refresh when refreshKey changes
+		const _rk = refreshKey;
 
 		(async () => {
 			const { default: TileLayer } = await import('ol/layer/Tile');
 			const { default: XYZ } = await import('ol/source/XYZ');
 
-			const url = `/api/v1/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/tile/{z}/{x}_{y}.png`;
+			const url = maskTileUrlTemplate(sessionId, condition, baseName);
 
 			if (layer) {
 				map.removeLayer(layer);
