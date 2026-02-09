@@ -3,7 +3,7 @@
 	import { sessionId } from '$stores/session';
 	import { totalImages } from '$stores/experiment';
 
-	export let title = 'CellQuant';
+	let { title = 'CellQuant' }: { title?: string } = $props();
 </script>
 
 <header class="app-header">

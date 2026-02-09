@@ -4,8 +4,9 @@
  */
 
 import type {
-	ExperimentScanResult,
-	Condition,
+	ScanResponse,
+	ConditionInfo,
+	ChannelConfig,
 	SegmentationParams,
 	SegmentationStatus,
 	TrackingParams,
@@ -43,15 +44,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ── Experiments ──────────────────────────────────────────
 
-export async function scanExperiment(folderPath: string): Promise<ExperimentScanResult> {
+export async function scanExperiment(folderPath: string): Promise<ScanResponse> {
 	return request('/experiments/scan', {
 		method: 'POST',
-		body: JSON.stringify({ folder_path: folderPath })
+		body: JSON.stringify({ path: folderPath })
 	});
 }
 
-export async function getConditions(sessionId: string): Promise<Condition[]> {
+export async function getExperiment(sessionId: string): Promise<ScanResponse> {
 	return request(`/experiments/${sessionId}`);
+}
+
+export async function configureChannels(
+	sessionId: string,
+	config: ChannelConfig
+): Promise<void> {
+	await request(`/experiments/${sessionId}/configure`, {
+		method: 'POST',
+		body: JSON.stringify(config)
+	});
 }
 
 // ── Images / Tiles ───────────────────────────────────────

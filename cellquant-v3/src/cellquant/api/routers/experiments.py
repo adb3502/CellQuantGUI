@@ -10,6 +10,7 @@ from cellquant.api.schemas.experiments import (
     ConditionInfo,
     ImageSetInfo,
     DetectionResult,
+    ChannelConfigSchema,
 )
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
@@ -124,3 +125,18 @@ async def get_experiment(session_id: str):
         )
 
     return ScanResponse(session_id=session.id, conditions=conditions)
+
+
+@router.post("/{session_id}/configure")
+async def configure_channels(session_id: str, config: ChannelConfigSchema):
+    """Update channel role assignments for the session."""
+    session = get_session(session_id)
+    session.channel_config = {
+        "nuclear_suffix": config.nuclear_suffix,
+        "cyto_suffix": config.cyto_suffix,
+        "marker_suffixes": config.marker_suffixes,
+        "marker_names": config.marker_names,
+        "mitochondrial_markers": config.mitochondrial_markers,
+    }
+    session.save_state()
+    return {"status": "ok"}

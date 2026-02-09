@@ -1,12 +1,16 @@
 <script lang="ts">
-	import { FolderOpen, Search, ChevronRight } from 'lucide-svelte';
-	import { scanExperiment } from '$api/client';
+	import { FolderOpen, Search, ChevronRight, CheckCircle } from 'lucide-svelte';
+	import { scanExperiment, configureChannels } from '$api/client';
 	import { sessionId } from '$stores/session';
-	import { conditions, totalImages, experimentPath } from '$stores/experiment';
+	import { conditions, detection, experimentPath, totalImages, channelSuffixes } from '$stores/experiment';
 
 	let folderPath = $state('');
 	let scanning = $state(false);
 	let error = $state('');
+
+	// Channel role assignments
+	let nuclearSuffix = $state<string | null>(null);
+	let cytoSuffix = $state<string | null>(null);
 
 	async function handleScan() {
 		if (!folderPath.trim()) return;
@@ -16,14 +20,34 @@
 			const result = await scanExperiment(folderPath);
 			$sessionId = result.session_id;
 			$conditions = result.conditions;
-			$totalImages = result.total_images;
+			$detection = result.detection ?? null;
 			$experimentPath = folderPath;
+
+			// Auto-fill suggested channel assignments
+			if (result.detection) {
+				nuclearSuffix = result.detection.suggested_nuclear ?? null;
+				cytoSuffix = result.detection.suggested_cyto ?? null;
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Scan failed';
 		} finally {
 			scanning = false;
 		}
 	}
+
+	async function handleConfigure() {
+		if (!$sessionId) return;
+		const markers = $channelSuffixes.filter(
+			(s) => s !== nuclearSuffix && s !== cytoSuffix
+		);
+		await configureChannels($sessionId, {
+			nuclear_suffix: nuclearSuffix ?? undefined,
+			cyto_suffix: cytoSuffix ?? undefined,
+			marker_suffixes: markers
+		});
+	}
+
+	let totalImageSets = $derived($totalImages);
 </script>
 
 <div class="page-experiment">
@@ -36,7 +60,7 @@
 				<input
 					type="text"
 					bind:value={folderPath}
-					placeholder="Enter folder path or paste..."
+					placeholder="Enter folder path containing condition subfolders..."
 					class="folder-input font-ui"
 					onkeydown={(e) => e.key === 'Enter' && handleScan()}
 				/>
@@ -59,30 +83,40 @@
 		{/if}
 	</section>
 
-	<!-- Conditions Table -->
-	{#if $conditions.length > 0}
+	<!-- Detection Summary -->
+	{#if $detection}
 		<section class="panel">
-			<h2 class="section-header">Detected Conditions</h2>
+			<h2 class="section-header">Detection Summary</h2>
 			<div class="stats-row">
 				<div class="stat-card">
 					<div class="stat-value font-mono">{$conditions.length}</div>
 					<div class="stat-label font-ui">Conditions</div>
 				</div>
 				<div class="stat-card">
-					<div class="stat-value font-mono">{$totalImages}</div>
-					<div class="stat-label font-ui">Total Images</div>
+					<div class="stat-value font-mono">{totalImageSets}</div>
+					<div class="stat-label font-ui">Image Sets</div>
 				</div>
 				<div class="stat-card">
-					<div class="stat-value font-mono">{$conditions[0]?.channels.length ?? 0}</div>
+					<div class="stat-value font-mono">{$detection.n_channels}</div>
 					<div class="stat-label font-ui">Channels</div>
 				</div>
+				<div class="stat-card">
+					<div class="stat-value font-mono">{Math.round($detection.confidence * 100)}%</div>
+					<div class="stat-label font-ui">Confidence</div>
+				</div>
 			</div>
+		</section>
+	{/if}
 
+	<!-- Conditions Table -->
+	{#if $conditions.length > 0}
+		<section class="panel">
+			<h2 class="section-header">Conditions</h2>
 			<table class="conditions-table">
 				<thead>
 					<tr>
 						<th class="font-ui">Condition</th>
-						<th class="font-ui">Images</th>
+						<th class="font-ui">Image Sets</th>
 						<th class="font-ui">Channels</th>
 						<th class="font-ui">Path</th>
 					</tr>
@@ -94,8 +128,12 @@
 								<ChevronRight size={14} />
 								{cond.name}
 							</td>
-							<td class="font-mono">{cond.n_images}</td>
-							<td class="font-mono">{cond.channels.map(c => c.suffix).join(', ')}</td>
+							<td class="font-mono">{cond.n_image_sets}</td>
+							<td class="font-mono">
+								{#if cond.image_sets.length > 0}
+									{Object.keys(cond.image_sets[0].channels).join(', ')}
+								{/if}
+							</td>
 							<td class="font-mono path-cell" title={cond.path}>{cond.path}</td>
 						</tr>
 					{/each}
@@ -104,22 +142,48 @@
 		</section>
 
 		<!-- Channel Configuration -->
-		<section class="panel">
-			<h2 class="section-header">Channel Configuration</h2>
-			<div class="channel-grid">
-				{#each $conditions[0]?.channels ?? [] as channel}
+		{#if $channelSuffixes.length > 0}
+			<section class="panel">
+				<h2 class="section-header">Channel Configuration</h2>
+				<p class="config-hint font-ui">Assign roles to detected channel suffixes</p>
+				<div class="channel-grid">
 					<div class="channel-card">
-						<label class="channel-label font-ui">{channel.suffix}</label>
-						<select class="channel-select font-ui" value={channel.role}>
-							<option value="nucleus">Nucleus</option>
-							<option value="marker">Marker</option>
-							<option value="brightfield">Brightfield</option>
-							<option value="other">Other</option>
+						<label class="channel-label font-ui" for="nuclear-select">Nuclear Channel</label>
+						<select id="nuclear-select" class="channel-select font-ui" bind:value={nuclearSuffix} onchange={handleConfigure}>
+							<option value={null}>-- None --</option>
+							{#each $channelSuffixes as suffix}
+								<option value={suffix}>{suffix}</option>
+							{/each}
 						</select>
+						{#if nuclearSuffix}
+							<span class="badge badge-success">
+								<CheckCircle size={10} /> Assigned
+							</span>
+						{/if}
 					</div>
-				{/each}
-			</div>
-		</section>
+					<div class="channel-card">
+						<label class="channel-label font-ui" for="cyto-select">Cytoplasm Channel</label>
+						<select id="cyto-select" class="channel-select font-ui" bind:value={cytoSuffix} onchange={handleConfigure}>
+							<option value={null}>-- None --</option>
+							{#each $channelSuffixes as suffix}
+								<option value={suffix}>{suffix}</option>
+							{/each}
+						</select>
+						{#if cytoSuffix}
+							<span class="badge badge-success">
+								<CheckCircle size={10} /> Assigned
+							</span>
+						{/if}
+					</div>
+					{#each $channelSuffixes.filter(s => s !== nuclearSuffix && s !== cytoSuffix) as suffix}
+						<div class="channel-card">
+							<span class="channel-label font-ui">{suffix}</span>
+							<span class="badge badge-accent">Marker</span>
+						</div>
+					{/each}
+				</div>
+			</section>
+		{/if}
 	{/if}
 </div>
 
@@ -192,6 +256,7 @@
 		cursor: pointer;
 		transition: all var(--transition-fast);
 		border: none;
+		white-space: nowrap;
 	}
 
 	.btn:disabled {
@@ -221,9 +286,8 @@
 
 	.stats-row {
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+		grid-template-columns: repeat(4, 1fr);
 		gap: 16px;
-		margin-bottom: 20px;
 	}
 
 	:global(.dark) .stats-row {
@@ -318,6 +382,12 @@
 		white-space: nowrap;
 		font-size: 11px;
 		color: var(--text-muted);
+	}
+
+	.config-hint {
+		font-size: 12px;
+		color: var(--text-muted);
+		margin: 0 0 16px 0;
 	}
 
 	.channel-grid {

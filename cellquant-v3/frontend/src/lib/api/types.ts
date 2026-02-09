@@ -4,25 +4,40 @@
 
 // ── Experiments ──────────────────────────────────────────
 
-export interface ChannelInfo {
-	suffix: string;
-	role: 'nucleus' | 'marker' | 'brightfield' | 'other';
-	display_name: string;
+export interface ImageSetInfo {
+	base_name: string;
+	channels: Record<string, string>; // suffix -> filepath
 }
 
-export interface Condition {
+export interface ConditionInfo {
 	name: string;
 	path: string;
-	tiff_files: string[];
-	n_images: number;
-	channels: ChannelInfo[];
+	n_image_sets: number;
+	image_sets: ImageSetInfo[];
 }
 
-export interface ExperimentScanResult {
+export interface DetectionResult {
+	channel_suffixes: string[];
+	n_channels: number;
+	n_image_sets: number;
+	n_complete: number;
+	n_incomplete: number;
+	confidence: number;
+	suggested_nuclear?: string;
+	suggested_cyto?: string;
+	suggested_markers: string[];
+}
+
+export interface ScanResponse {
 	session_id: string;
-	conditions: Condition[];
-	total_images: number;
-	scan_time_ms: number;
+	conditions: ConditionInfo[];
+	detection?: DetectionResult;
+}
+
+export interface ChannelConfig {
+	nuclear_suffix?: string;
+	cyto_suffix?: string;
+	marker_suffixes: string[];
 }
 
 // ── Segmentation ─────────────────────────────────────────

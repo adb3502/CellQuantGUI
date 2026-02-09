@@ -20,6 +20,7 @@ class Session:
     # Experiment state
     experiment_path: Optional[Path] = None
     conditions: Dict[str, dict] = field(default_factory=dict)
+    channel_config: Dict[str, any] = field(default_factory=dict)
 
     # Masks: {condition_name: {base_name: np.ndarray}}
     masks: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
