@@ -1,6 +1,11 @@
 <script lang="ts">
-	export let percent = 0;
-	export let message = '';
+	let {
+		percent = 0,
+		message = ''
+	}: {
+		percent?: number;
+		message?: string;
+	} = $props();
 </script>
 
 <div class="progress-wrapper">

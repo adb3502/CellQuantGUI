@@ -47,19 +47,19 @@ export interface SegmentationParams {
 	diameter: number | null;
 	flow_threshold: number;
 	cellprob_threshold: number;
+	min_size: number;
 	channels: [number, number];
-	gpu: boolean;
-	condition_names: string[];
+	use_gpu: boolean;
+	batch_size: number;
 }
 
 export interface SegmentationStatus {
 	task_id: string;
-	status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+	status: 'pending' | 'running' | 'complete' | 'error' | 'cancelled';
 	progress: number;
-	current_image: string;
-	total_images: number;
-	processed_images: number;
-	error?: string;
+	message: string;
+	elapsed_seconds: number;
+	result?: { total_cells?: number; images_processed?: number };
 }
 
 // ── Tracking ─────────────────────────────────────────────
@@ -142,11 +142,20 @@ export interface ResultsSummary {
 // ── Progress / WebSocket ─────────────────────────────────
 
 export interface ProgressMessage {
-	type: 'progress' | 'complete' | 'error' | 'heartbeat';
+	type: 'progress' | 'task_complete' | 'heartbeat';
 	task_id?: string;
+	task_type?: string;
+	status?: string;
 	progress?: number;
+	current?: number;
+	total?: number;
+	stage?: string;
+	condition?: string;
+	image_set?: string;
 	message?: string;
-	detail?: string;
+	elapsed_seconds?: number;
+	data?: Record<string, unknown>;
+	error?: string;
 }
 
 // ── Images / Tiles ───────────────────────────────────────

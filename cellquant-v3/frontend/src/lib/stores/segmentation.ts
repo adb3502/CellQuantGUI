@@ -6,9 +6,10 @@ export const segParams = writable<SegmentationParams>({
 	diameter: null,
 	flow_threshold: 0.4,
 	cellprob_threshold: 0.0,
+	min_size: 15,
 	channels: [0, 0],
-	gpu: true,
-	condition_names: []
+	use_gpu: true,
+	batch_size: 4
 });
 
 export const segStatus = writable<SegmentationStatus | null>(null);

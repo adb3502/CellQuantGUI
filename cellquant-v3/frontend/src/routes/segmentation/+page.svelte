@@ -1,12 +1,20 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import { Microscope, Play, Square, RotateCcw } from 'lucide-svelte';
-	import { runSegmentation, cancelSegmentation } from '$api/client';
+	import { runSegmentation, cancelSegmentation, getSegmentationStatus } from '$api/client';
+	import { ProgressSocket } from '$api/websocket';
+	import type { ProgressMessage } from '$api/types';
 	import { sessionId } from '$stores/session';
-	import { conditionNames } from '$stores/experiment';
 	import { segParams, segStatus, segTaskId } from '$stores/segmentation';
-	import { progressPercent, progressMessage } from '$stores/progress';
+	import TaskStatus from '$components/progress/TaskStatus.svelte';
 
 	let running = $state(false);
+	let wsProgress = $state(0);
+	let wsMessage = $state('');
+	let wsStatus = $state('pending');
+	let wsElapsed = $state(0);
+	let wsResult = $state<Record<string, unknown> | null>(null);
+	let socket: ProgressSocket | null = null;
 
 	const modelOptions = [
 		{ value: 'cyto3', label: 'Cyto3 (general)' },
@@ -15,15 +23,56 @@
 		{ value: 'tissuenet_cp3', label: 'TissueNet' }
 	];
 
+	function connectWebSocket() {
+		if (!$sessionId || socket) return;
+		socket = new ProgressSocket($sessionId);
+		socket.onMessage(handleWSMessage);
+		socket.connect();
+	}
+
+	function disconnectWebSocket() {
+		socket?.disconnect();
+		socket = null;
+	}
+
+	function handleWSMessage(msg: ProgressMessage) {
+		if (msg.task_id && msg.task_id !== $segTaskId) return;
+
+		if (msg.type === 'progress') {
+			wsProgress = msg.progress ?? 0;
+			wsMessage = msg.message ?? '';
+			wsStatus = 'running';
+			wsElapsed = msg.elapsed_seconds ?? 0;
+		} else if (msg.type === 'task_complete') {
+			wsProgress = 100;
+			wsStatus = msg.status ?? 'complete';
+			wsMessage = msg.message ?? '';
+			wsElapsed = msg.elapsed_seconds ?? 0;
+			wsResult = (msg.data as Record<string, unknown>) ?? null;
+			running = false;
+			disconnectWebSocket();
+		}
+	}
+
 	async function handleRun() {
 		if (!$sessionId) return;
 		running = true;
+		wsProgress = 0;
+		wsMessage = 'Submitting...';
+		wsStatus = 'pending';
+		wsResult = null;
+
+		connectWebSocket();
+
 		try {
-			$segParams.condition_names = $conditionNames;
 			const { task_id } = await runSegmentation($sessionId, $segParams);
 			$segTaskId = task_id;
-		} catch {
+			wsStatus = 'running';
+		} catch (e) {
 			running = false;
+			wsStatus = 'error';
+			wsMessage = e instanceof Error ? e.message : 'Failed to start segmentation';
+			disconnectWebSocket();
 		}
 	}
 
@@ -31,8 +80,23 @@
 		if ($segTaskId) {
 			await cancelSegmentation($segTaskId);
 			running = false;
+			wsStatus = 'cancelled';
+			wsMessage = 'Cancelled by user';
+			disconnectWebSocket();
 		}
 	}
+
+	function handleReset() {
+		$segTaskId = null;
+		wsProgress = 0;
+		wsMessage = '';
+		wsStatus = 'pending';
+		wsResult = null;
+	}
+
+	onDestroy(() => {
+		disconnectWebSocket();
+	});
 </script>
 
 <div class="page-segmentation">
@@ -66,33 +130,59 @@
 
 				<div class="form-field">
 					<label class="field-label font-ui">Flow Threshold</label>
-					<input
-						type="range"
-						class="field-range"
-						bind:value={$segParams.flow_threshold}
-						min="0"
-						max="3"
-						step="0.1"
-					/>
-					<span class="field-value font-mono">{$segParams.flow_threshold.toFixed(1)}</span>
+					<div class="range-row">
+						<input
+							type="range"
+							class="field-range"
+							bind:value={$segParams.flow_threshold}
+							min="0"
+							max="3"
+							step="0.1"
+						/>
+						<span class="field-value font-mono">{$segParams.flow_threshold.toFixed(1)}</span>
+					</div>
 				</div>
 
 				<div class="form-field">
 					<label class="field-label font-ui">Cell Probability</label>
+					<div class="range-row">
+						<input
+							type="range"
+							class="field-range"
+							bind:value={$segParams.cellprob_threshold}
+							min="-6"
+							max="6"
+							step="0.5"
+						/>
+						<span class="field-value font-mono">{$segParams.cellprob_threshold.toFixed(1)}</span>
+					</div>
+				</div>
+
+				<div class="form-field">
+					<label class="field-label font-ui">Min Cell Size (px)</label>
 					<input
-						type="range"
-						class="field-range"
-						bind:value={$segParams.cellprob_threshold}
-						min="-6"
-						max="6"
-						step="0.5"
+						type="number"
+						class="field-input font-mono"
+						bind:value={$segParams.min_size}
+						min="1"
+						max="1000"
 					/>
-					<span class="field-value font-mono">{$segParams.cellprob_threshold.toFixed(1)}</span>
+				</div>
+
+				<div class="form-field">
+					<label class="field-label font-ui">Batch Size</label>
+					<input
+						type="number"
+						class="field-input font-mono"
+						bind:value={$segParams.batch_size}
+						min="1"
+						max="32"
+					/>
 				</div>
 
 				<div class="form-field">
 					<label class="field-label font-ui">
-						<input type="checkbox" bind:checked={$segParams.gpu} />
+						<input type="checkbox" bind:checked={$segParams.use_gpu} />
 						Use GPU
 					</label>
 				</div>
@@ -113,31 +203,37 @@
 						Cancel
 					</button>
 				{/if}
+				{#if !running && wsStatus !== 'pending'}
+					<button class="btn btn-secondary font-ui" onclick={handleReset}>
+						<RotateCcw size={16} />
+						Reset
+					</button>
+				{/if}
 			</div>
 		</section>
 
-		<!-- Preview Panel -->
+		<!-- Status / Preview Panel -->
 		<section class="panel preview-panel">
-			<h2 class="section-header">Preview</h2>
+			<h2 class="section-header">Segmentation Status</h2>
 
-			{#if running}
-				<div class="progress-section">
-					<div class="progress-info font-ui">
-						<span>{$progressMessage || 'Processing...'}</span>
-						<span class="font-mono">{Math.round($progressPercent)}%</span>
-					</div>
-					<div class="progress-track">
-						<div class="progress-fill" style="width: {$progressPercent}%"></div>
+			{#if $segTaskId}
+				<TaskStatus
+					taskId={$segTaskId}
+					status={wsStatus}
+					progress={wsProgress}
+					message={wsMessage}
+					elapsed={wsElapsed}
+					result={wsResult}
+				/>
+			{:else}
+				<div class="preview-area">
+					<div class="placeholder font-ui">
+						<Microscope size={48} strokeWidth={1} />
+						<p>Configure parameters and run segmentation</p>
+						<p class="hint">Cellpose will detect cells across all loaded conditions</p>
 					</div>
 				</div>
 			{/if}
-
-			<div class="preview-area">
-				<div class="placeholder font-ui">
-					<Microscope size={48} strokeWidth={1} />
-					<p>Segmentation preview will appear here</p>
-				</div>
-			</div>
 		</section>
 	</div>
 </div>
@@ -210,13 +306,22 @@
 		box-shadow: 0 0 0 3px var(--accent-soft);
 	}
 
+	.range-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
 	.field-range {
+		flex: 1;
 		accent-color: var(--accent);
 	}
 
 	.field-value {
 		font-size: 12px;
 		color: var(--accent);
+		min-width: 36px;
+		text-align: right;
 	}
 
 	.field-hint {
@@ -274,21 +379,10 @@
 	}
 
 	.preview-panel {
-		min-height: 500px;
+		min-height: 400px;
 		display: flex;
 		flex-direction: column;
-	}
-
-	.progress-section {
-		margin-bottom: 16px;
-	}
-
-	.progress-info {
-		display: flex;
-		justify-content: space-between;
-		font-size: 12px;
-		color: var(--text-muted);
-		margin-bottom: 6px;
+		gap: 16px;
 	}
 
 	.preview-area {
@@ -306,6 +400,11 @@
 	.placeholder p {
 		margin-top: 12px;
 		font-size: 13px;
+	}
+
+	.placeholder .hint {
+		font-size: 11px;
+		margin-top: 4px;
 	}
 
 	@media (max-width: 900px) {

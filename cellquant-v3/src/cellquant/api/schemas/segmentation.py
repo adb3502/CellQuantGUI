@@ -7,7 +7,7 @@ from typing import List, Optional
 class SegmentationRequest(BaseModel):
     session_id: str
     model_type: str = "cyto3"
-    diameter: float = 30.0
+    diameter: Optional[float] = 30.0
     flow_threshold: float = 0.4
     cellprob_threshold: float = 0.0
     min_size: int = 15
