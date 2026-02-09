@@ -232,12 +232,8 @@ export async function getResultsSummary(sessionId: string): Promise<ResultsSumma
 
 // ── Export ────────────────────────────────────────────────
 
-async function downloadFile(path: string, body: object, filename: string): Promise<void> {
-	const res = await fetch(`${BASE}${path}`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	});
+async function downloadFile(path: string, filename: string): Promise<void> {
+	const res = await fetch(`${BASE}${path}`, { method: 'POST' });
 	if (!res.ok) throw new ApiError(res.status, await res.text());
 	const blob = await res.blob();
 	const url = URL.createObjectURL(blob);
@@ -249,15 +245,22 @@ async function downloadFile(path: string, body: object, filename: string): Promi
 }
 
 export async function exportCsv(sessionId: string): Promise<void> {
-	await downloadFile('/export/csv', { session_id: sessionId }, 'cellquant_results.csv');
+	await downloadFile(`/export/csv/${sessionId}`, 'cellquant_results.csv');
 }
 
 export async function exportExcel(sessionId: string): Promise<void> {
-	await downloadFile('/export/excel', { session_id: sessionId }, 'cellquant_results.xlsx');
+	await downloadFile(`/export/excel/${sessionId}`, 'cellquant_results.xlsx');
 }
 
-export async function exportRois(sessionId: string): Promise<void> {
-	await downloadFile('/export/rois', { session_id: sessionId }, 'cellquant_rois.zip');
+export async function exportRois(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): Promise<void> {
+	await downloadFile(
+		`/export/rois/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}`,
+		`${baseName}_rois.zip`
+	);
 }
 
 // ── Napari ───────────────────────────────────────────────

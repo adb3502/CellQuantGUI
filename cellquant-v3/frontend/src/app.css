@@ -1,11 +1,11 @@
-@import "tailwindcss";
-
 /* ══════════════════════════════════════════════════════════════
    FONT IMPORTS — Two complete typographic identities
    Light: Classical scientific publishing (serif-forward)
    Dark: Contemporary instrument interface (geometric sans)
    ══════════════════════════════════════════════════════════════ */
 @import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400&family=Lato:wght@300;400;500;600;700&family=Inconsolata:wght@400;500;600&family=Outfit:wght@200;300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@import "tailwindcss";
 
 /* ══════════════════════════════════════════════════════════════
    THEME: HISTOLOGY ATLAS (Light)

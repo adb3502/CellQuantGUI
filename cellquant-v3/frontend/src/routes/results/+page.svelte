@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { BarChart3, Download, FileSpreadsheet, FileText, Image } from 'lucide-svelte';
-	import { getResultsPage, getResultsSummary, exportCsv, exportExcel, exportRois } from '$api/client';
+	import { BarChart3, FileSpreadsheet, FileText } from 'lucide-svelte';
+	import { getResultsPage, getResultsSummary, exportCsv, exportExcel } from '$api/client';
 	import { sessionId } from '$stores/session';
 	import { resultsPage, quantSummary } from '$stores/quantification';
 
@@ -160,11 +160,6 @@
 			<FileSpreadsheet size={14} />
 			Excel
 		</button>
-		<button class="export-btn font-ui" onclick={() => $sessionId && exportRois($sessionId)}>
-			<Image size={14} />
-			ROIs
-		</button>
-
 		{#if totalRows > 0}
 			<button class="export-btn refresh-btn font-ui" onclick={() => { loadPage(0); loadSummary(); }}>
 				Refresh

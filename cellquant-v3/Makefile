@@ -1,4 +1,4 @@
-.PHONY: dev dev-backend dev-frontend build test clean install
+.PHONY: dev dev-backend dev-frontend build test clean install docker
 
 # Development
 dev-backend:
@@ -15,12 +15,16 @@ build-frontend:
 	cd frontend && npm ci && npm run build
 
 build: build-frontend
+	mkdir -p src/cellquant/static
 	cp -r frontend/build/* src/cellquant/static/
 	python -m build
 
 # Install
 install:
 	pip install -e ".[all,dev]"
+
+install-frontend:
+	cd frontend && npm ci
 
 # Test
 test:
@@ -32,7 +36,18 @@ test-core:
 test-api:
 	pytest tests/python/test_api/ -v
 
+# Docker
+docker:
+	docker build -t cellquant:latest .
+
+docker-run:
+	docker run --rm -p 8000:8000 --gpus all cellquant:latest
+
 # Clean
 clean:
 	rm -rf dist/ build/ src/cellquant/static/*
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# Session cleanup
+cleanup:
+	python -m cellquant cleanup --max-age 24
