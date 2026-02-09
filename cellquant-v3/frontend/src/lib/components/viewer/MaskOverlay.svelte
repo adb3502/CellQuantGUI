@@ -1,14 +1,65 @@
 <script lang="ts">
 	/**
 	 * Mask overlay tile layer for OpenLayers.
-	 * Renders RGBA mask tiles as a separate layer.
+	 * Adds an RGBA mask tile layer to an existing OL map.
 	 */
-	export let sessionId: string;
-	export let condition: string;
-	export let baseName: string;
-	export let visible = true;
-	export let opacity = 0.5;
-</script>
+	import { onMount, onDestroy } from 'svelte';
 
-<!-- This component programmatically adds a TileLayer to the parent OL map -->
-<!-- Actual implementation will be wired during Phase 5 (Mask Editing) -->
+	let {
+		map = null,
+		sessionId,
+		condition,
+		baseName,
+		visible = true,
+		opacity = 0.5
+	}: {
+		map?: any;
+		sessionId: string;
+		condition: string;
+		baseName: string;
+		visible?: boolean;
+		opacity?: number;
+	} = $props();
+
+	let layer: any = null;
+
+	$effect(() => {
+		if (!map) return;
+
+		(async () => {
+			const { default: TileLayer } = await import('ol/layer/Tile');
+			const { default: XYZ } = await import('ol/source/XYZ');
+
+			const url = `/api/v1/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/tile/{z}/{x}_{y}.png`;
+
+			if (layer) {
+				map.removeLayer(layer);
+			}
+
+			layer = new TileLayer({
+				source: new XYZ({
+					url,
+					tileSize: 256,
+					wrapX: false
+				}),
+				opacity,
+				visible
+			});
+
+			map.addLayer(layer);
+		})();
+	});
+
+	$effect(() => {
+		if (layer) {
+			layer.setVisible(visible);
+			layer.setOpacity(opacity);
+		}
+	});
+
+	onDestroy(() => {
+		if (map && layer) {
+			map.removeLayer(layer);
+		}
+	});
+</script>

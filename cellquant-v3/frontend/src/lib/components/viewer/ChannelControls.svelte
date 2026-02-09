@@ -1,18 +1,21 @@
 <script lang="ts">
 	/**
-	 * Channel visibility, color, and contrast controls
-	 * for the image viewer.
+	 * Channel visibility, color, and contrast controls.
 	 */
 	import { Eye, EyeOff } from 'lucide-svelte';
-	import type { ChannelInfo } from '$api/types';
 
-	export let channels: ChannelInfo[] = [];
+	let {
+		channels = [],
+		onToggle
+	}: {
+		channels?: string[];
+		onToggle?: (channel: string, visible: boolean) => void;
+	} = $props();
 
 	type ChannelState = {
 		visible: boolean;
 		color: string;
 		contrast: number;
-		brightness: number;
 	};
 
 	let channelStates = $state<Record<string, ChannelState>>({});
@@ -20,40 +23,43 @@
 	$effect(() => {
 		const states: Record<string, ChannelState> = {};
 		for (const ch of channels) {
-			states[ch.suffix] = channelStates[ch.suffix] ?? {
+			states[ch] = channelStates[ch] ?? {
 				visible: true,
 				color: '#ffffff',
-				contrast: 1.0,
-				brightness: 0
+				contrast: 1.0
 			};
 		}
 		channelStates = states;
 	});
+
+	function toggleChannel(ch: string) {
+		if (channelStates[ch]) {
+			channelStates[ch].visible = !channelStates[ch].visible;
+			onToggle?.(ch, channelStates[ch].visible);
+		}
+	}
 </script>
 
 <div class="channel-controls">
 	{#each channels as ch}
-		{@const state = channelStates[ch.suffix]}
+		{@const state = channelStates[ch]}
 		{#if state}
 			<div class="channel-row">
-				<button
-					class="vis-btn"
-					onclick={() => { channelStates[ch.suffix].visible = !state.visible; }}
-				>
+				<button class="vis-btn" onclick={() => toggleChannel(ch)}>
 					{#if state.visible}
 						<Eye size={14} />
 					{:else}
 						<EyeOff size={14} />
 					{/if}
 				</button>
-				<span class="ch-name font-ui">{ch.suffix}</span>
-				<input type="color" bind:value={channelStates[ch.suffix].color} class="ch-color" />
+				<span class="ch-name font-ui">{ch}</span>
+				<input type="color" bind:value={channelStates[ch].color} class="ch-color" />
 				<input
 					type="range"
 					min="0.1"
 					max="3"
 					step="0.1"
-					bind:value={channelStates[ch.suffix].contrast}
+					bind:value={channelStates[ch].contrast}
 					class="ch-slider"
 					title="Contrast"
 				/>

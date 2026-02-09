@@ -1,14 +1,21 @@
 <script lang="ts">
 	/**
 	 * Virtual-scrolled thumbnail grid.
-	 * Displays 256px JPEG thumbnails for all images in a condition.
+	 * Displays JPEG thumbnails for all images in a condition.
 	 */
 	import { thumbnailUrl } from '$api/client';
 
-	export let sessionId: string;
-	export let condition: string;
-	export let images: string[] = [];
-	export let onSelect: (baseName: string) => void = () => {};
+	let {
+		sessionId,
+		condition,
+		images = [],
+		onSelect = () => {}
+	}: {
+		sessionId: string;
+		condition: string;
+		images?: string[];
+		onSelect?: (baseName: string) => void;
+	} = $props();
 
 	let selected = $state<string | null>(null);
 </script>

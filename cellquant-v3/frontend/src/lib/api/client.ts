@@ -72,11 +72,20 @@ export function tileUrl(
 	condition: string,
 	baseName: string,
 	channel: string,
-	z: number,
-	x: number,
-	y: number
+	level: number,
+	col: number,
+	row: number
 ): string {
-	return `${BASE}/images/tile/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${encodeURIComponent(channel)}/${z}/${x}/${y}.png`;
+	return `${BASE}/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${encodeURIComponent(channel)}/tile/${level}/${col}_${row}.png`;
+}
+
+export function tileUrlTemplate(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	channel: string
+): string {
+	return `${BASE}/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${encodeURIComponent(channel)}/tile/{z}/{x}_{y}.png`;
 }
 
 export function thumbnailUrl(
@@ -84,15 +93,16 @@ export function thumbnailUrl(
 	condition: string,
 	baseName: string
 ): string {
-	return `${BASE}/images/thumbnail/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}`;
+	return `${BASE}/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/thumbnail`;
 }
 
 export async function getImageMetadata(
 	sessionId: string,
 	condition: string,
-	baseName: string
+	baseName: string,
+	channel: string
 ): Promise<ImageMetadata> {
-	return request(`/images/metadata/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}`);
+	return request(`/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${encodeURIComponent(channel)}/metadata`);
 }
 
 // ── Segmentation ─────────────────────────────────────────
