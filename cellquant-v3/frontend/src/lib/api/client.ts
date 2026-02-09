@@ -10,7 +10,7 @@ import type {
 	SegmentationParams,
 	SegmentationStatus,
 	TrackingParams,
-	TrackingResult,
+	TrackingSummary,
 	QuantificationParams,
 	ResultsPage,
 	ResultsSummary,
@@ -137,10 +137,10 @@ export async function runTracking(
 	});
 }
 
-export async function getTrackingResult(
+export async function getTrackingSummary(
 	sessionId: string,
 	condition: string
-): Promise<TrackingResult> {
+): Promise<TrackingSummary> {
 	return request(`/tracking/tracks/${sessionId}/${encodeURIComponent(condition)}`);
 }
 

@@ -67,33 +67,14 @@ export interface SegmentationStatus {
 export interface TrackingParams {
 	model: string;
 	mode: 'greedy' | 'greedy_nodiv' | 'ilp';
-	condition_name: string;
+	condition: string;
 }
 
-export interface TrackPoint {
-	frame: number;
-	centroid_y: number;
-	centroid_x: number;
-}
-
-export interface TrackPath {
-	track_id: number;
-	points: TrackPoint[];
-}
-
-export interface LineageNode {
-	id: number;
-	parent: number | null;
-	children: number[];
-	is_division: boolean;
-}
-
-export interface TrackingResult {
-	task_id: string;
-	status: 'pending' | 'running' | 'completed' | 'failed';
+export interface TrackingSummary {
+	condition: string;
+	n_frames: number;
 	n_tracks: number;
-	tracks: TrackPath[];
-	lineage: LineageNode[];
+	frame_names: string[];
 }
 
 // ── Masks ────────────────────────────────────────────────

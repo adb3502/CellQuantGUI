@@ -1,43 +1,137 @@
 <script lang="ts">
-	import { Route, Play, Pause, SkipBack, SkipForward, GitBranch } from 'lucide-svelte';
-	import { runTracking } from '$api/client';
+	import { onDestroy } from 'svelte';
+	import { Route, Play, Pause, SkipBack, SkipForward, Square, RotateCcw } from 'lucide-svelte';
+	import { runTracking, getTrackingSummary } from '$api/client';
+	import { ProgressSocket } from '$api/websocket';
+	import type { ProgressMessage } from '$api/types';
 	import { sessionId } from '$stores/session';
-	import { selectedCondition } from '$stores/experiment';
+	import { conditions, selectedCondition } from '$stores/experiment';
 	import {
 		trackingModel,
 		trackingMode,
+		trackingSummary,
 		currentFrame,
 		totalFrames,
 		isPlaying,
-		trackTaskId,
-		tracks,
-		lineage
+		trackTaskId
 	} from '$stores/tracking';
+	import TaskStatus from '$components/progress/TaskStatus.svelte';
 
 	let running = $state(false);
+	let wsProgress = $state(0);
+	let wsMessage = $state('');
+	let wsStatus = $state('pending');
+	let wsElapsed = $state(0);
+	let wsResult = $state<Record<string, unknown> | null>(null);
+	let socket: ProgressSocket | null = null;
+	let playInterval: ReturnType<typeof setInterval> | null = null;
+
+	function connectWebSocket() {
+		if (!$sessionId || socket) return;
+		socket = new ProgressSocket($sessionId);
+		socket.onMessage(handleWSMessage);
+		socket.connect();
+	}
+
+	function disconnectWebSocket() {
+		socket?.disconnect();
+		socket = null;
+	}
+
+	function handleWSMessage(msg: ProgressMessage) {
+		if (msg.task_id && msg.task_id !== $trackTaskId) return;
+
+		if (msg.type === 'progress') {
+			wsProgress = msg.progress ?? 0;
+			wsMessage = msg.message ?? '';
+			wsStatus = 'running';
+			wsElapsed = msg.elapsed_seconds ?? 0;
+		} else if (msg.type === 'task_complete') {
+			wsProgress = 100;
+			wsStatus = msg.status ?? 'complete';
+			wsMessage = msg.message ?? '';
+			wsElapsed = msg.elapsed_seconds ?? 0;
+			wsResult = (msg.data as Record<string, unknown>) ?? null;
+			running = false;
+			disconnectWebSocket();
+			loadTrackingSummary();
+		}
+	}
 
 	async function handleTrack() {
 		if (!$sessionId || !$selectedCondition) return;
 		running = true;
+		wsProgress = 0;
+		wsMessage = 'Submitting...';
+		wsStatus = 'pending';
+		wsResult = null;
+
+		connectWebSocket();
+
 		try {
 			const { task_id } = await runTracking($sessionId, {
 				model: $trackingModel,
 				mode: $trackingMode,
-				condition_name: $selectedCondition
+				condition: $selectedCondition
 			});
 			$trackTaskId = task_id;
-		} catch {
+			wsStatus = 'running';
+		} catch (e) {
 			running = false;
+			wsStatus = 'error';
+			wsMessage = e instanceof Error ? e.message : 'Failed to start tracking';
+			disconnectWebSocket();
+		}
+	}
+
+	async function loadTrackingSummary() {
+		if (!$sessionId || !$selectedCondition) return;
+		try {
+			const summary = await getTrackingSummary($sessionId, $selectedCondition);
+			$trackingSummary = summary;
+			$totalFrames = summary.n_frames;
+			$currentFrame = 0;
+		} catch {
+			// No tracking data yet
 		}
 	}
 
 	function togglePlayback() {
 		$isPlaying = !$isPlaying;
+		if ($isPlaying) {
+			playInterval = setInterval(() => {
+				if ($currentFrame < $totalFrames - 1) {
+					$currentFrame++;
+				} else {
+					$isPlaying = false;
+					if (playInterval) clearInterval(playInterval);
+				}
+			}, 200);
+		} else if (playInterval) {
+			clearInterval(playInterval);
+			playInterval = null;
+		}
 	}
 
 	function stepFrame(delta: number) {
 		$currentFrame = Math.max(0, Math.min($totalFrames - 1, $currentFrame + delta));
 	}
+
+	function handleReset() {
+		$trackTaskId = null;
+		$trackingSummary = null;
+		wsProgress = 0;
+		wsMessage = '';
+		wsStatus = 'pending';
+		wsResult = null;
+		$currentFrame = 0;
+		$totalFrames = 0;
+	}
+
+	onDestroy(() => {
+		disconnectWebSocket();
+		if (playInterval) clearInterval(playInterval);
+	});
 </script>
 
 <div class="page-tracking">
@@ -47,6 +141,16 @@
 			<h2 class="section-header">Trackastra Cell Tracking</h2>
 
 			<div class="form-grid">
+				<div class="form-field">
+					<label class="field-label font-ui">Condition</label>
+					<select class="field-input font-ui" bind:value={$selectedCondition}>
+						<option value={null}>Select condition...</option>
+						{#each $conditions as cond}
+							<option value={cond.name}>{cond.name} ({cond.n_image_sets} images)</option>
+						{/each}
+					</select>
+				</div>
+
 				<div class="form-field">
 					<label class="field-label font-ui">Pretrained Model</label>
 					<select class="field-input font-ui" bind:value={$trackingModel}>
@@ -82,21 +186,40 @@
 					<Route size={16} />
 					Run Tracking
 				</button>
+				{#if !running && wsStatus !== 'pending'}
+					<button class="btn btn-secondary font-ui" onclick={handleReset}>
+						<RotateCcw size={16} />
+						Reset
+					</button>
+				{/if}
 			</div>
 
-			<!-- Lineage Tree -->
-			{#if $lineage.length > 0}
-				<div class="lineage-section">
-					<h3 class="subsection-header font-ui">
-						<GitBranch size={14} />
-						Lineage Tree
-					</h3>
-					<div class="lineage-stats font-mono">
-						<span>{$tracks.length} tracks</span>
-						<span>{$lineage.filter(n => n.is_division).length} divisions</span>
-					</div>
-					<div class="lineage-tree-placeholder font-ui">
-						Lineage tree visualization
+			{#if $trackTaskId}
+				<div class="task-section">
+					<TaskStatus
+						taskId={$trackTaskId}
+						status={wsStatus}
+						progress={wsProgress}
+						message={wsMessage}
+						elapsed={wsElapsed}
+						result={wsResult}
+					/>
+				</div>
+			{/if}
+
+			<!-- Tracking Summary -->
+			{#if $trackingSummary}
+				<div class="summary-section">
+					<h3 class="subsection-header font-ui">Results</h3>
+					<div class="summary-stats">
+						<div class="stat-item">
+							<span class="stat-value font-mono">{$trackingSummary.n_tracks}</span>
+							<span class="stat-label font-ui">tracks</span>
+						</div>
+						<div class="stat-item">
+							<span class="stat-value font-mono">{$trackingSummary.n_frames}</span>
+							<span class="stat-label font-ui">frames</span>
+						</div>
 					</div>
 				</div>
 			{/if}
@@ -108,17 +231,17 @@
 
 			<!-- Playback Controls -->
 			<div class="playback-controls">
-				<button class="playback-btn" onclick={() => stepFrame(-1)} aria-label="Previous frame">
+				<button class="playback-btn" onclick={() => stepFrame(-1)} aria-label="Previous frame" disabled={$totalFrames === 0}>
 					<SkipBack size={16} />
 				</button>
-				<button class="playback-btn play-btn" onclick={togglePlayback} aria-label={$isPlaying ? 'Pause' : 'Play'}>
+				<button class="playback-btn play-btn" onclick={togglePlayback} aria-label={$isPlaying ? 'Pause' : 'Play'} disabled={$totalFrames === 0}>
 					{#if $isPlaying}
 						<Pause size={18} />
 					{:else}
 						<Play size={18} />
 					{/if}
 				</button>
-				<button class="playback-btn" onclick={() => stepFrame(1)} aria-label="Next frame">
+				<button class="playback-btn" onclick={() => stepFrame(1)} aria-label="Next frame" disabled={$totalFrames === 0}>
 					<SkipForward size={16} />
 				</button>
 
@@ -129,19 +252,26 @@
 						max={Math.max(0, $totalFrames - 1)}
 						bind:value={$currentFrame}
 						class="slider"
+						disabled={$totalFrames === 0}
 					/>
 				</div>
 				<span class="frame-label font-mono">
-					{$currentFrame + 1}/{$totalFrames || '--'}
+					{$totalFrames > 0 ? `${$currentFrame + 1}/${$totalFrames}` : '--/--'}
 				</span>
 			</div>
 
 			<!-- Viewer Area -->
 			<div class="viewer-area">
-				<div class="placeholder font-ui">
-					<Route size={48} strokeWidth={1} />
-					<p>Track overlay will appear here after tracking</p>
-				</div>
+				{#if $trackingSummary && $trackingSummary.n_frames > 0}
+					<div class="frame-info font-mono">
+						Frame: {$trackingSummary.frame_names[$currentFrame] ?? $currentFrame}
+					</div>
+				{:else}
+					<div class="placeholder font-ui">
+						<Route size={48} strokeWidth={1} />
+						<p>Select a condition with timelapse data and run tracking</p>
+					</div>
+				{/if}
 			</div>
 		</section>
 	</div>
@@ -154,7 +284,7 @@
 
 	.two-col {
 		display: grid;
-		grid-template-columns: 340px 1fr;
+		grid-template-columns: 380px 1fr;
 		gap: 24px;
 		align-items: start;
 	}
@@ -232,6 +362,8 @@
 	}
 
 	.action-row {
+		display: flex;
+		gap: 10px;
 		margin-top: 24px;
 	}
 
@@ -267,7 +399,22 @@
 		transform: translateY(-1px);
 	}
 
-	.lineage-section {
+	.btn-secondary {
+		background: var(--bg);
+		color: var(--text);
+		border: 1px solid var(--border);
+	}
+
+	.btn-secondary:hover {
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+
+	.task-section {
+		margin-top: 20px;
+	}
+
+	.summary-section {
 		margin-top: 24px;
 		padding-top: 20px;
 		border-top: 1px solid var(--border);
@@ -278,33 +425,33 @@
 		font-weight: 600;
 		color: var(--text);
 		margin: 0 0 12px 0;
-		display: flex;
-		align-items: center;
-		gap: 6px;
 	}
 
-	.lineage-stats {
+	.summary-stats {
+		display: flex;
+		gap: 24px;
+	}
+
+	.stat-item {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.stat-value {
+		font-size: 20px;
+		font-weight: 600;
+		color: var(--accent);
+	}
+
+	.stat-label {
 		font-size: 11px;
 		color: var(--text-muted);
-		display: flex;
-		gap: 16px;
-		margin-bottom: 12px;
-	}
-
-	.lineage-tree-placeholder {
-		height: 200px;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-md);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		color: var(--text-faint);
-		font-size: 13px;
+		text-transform: uppercase;
 	}
 
 	.viewer-panel {
-		min-height: 600px;
+		min-height: 500px;
 		display: flex;
 		flex-direction: column;
 	}
@@ -330,9 +477,14 @@
 		transition: all var(--transition-fast);
 	}
 
-	.playback-btn:hover {
+	.playback-btn:hover:not(:disabled) {
 		color: var(--accent);
 		border-color: var(--accent);
+	}
+
+	.playback-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
 	}
 
 	.play-btn {
@@ -369,6 +521,11 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+	}
+
+	.frame-info {
+		font-size: 13px;
+		color: var(--text);
 	}
 
 	.placeholder {
