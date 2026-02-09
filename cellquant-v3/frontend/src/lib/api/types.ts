@@ -89,35 +89,26 @@ export interface CellInfo {
 // ── Quantification ───────────────────────────────────────
 
 export interface QuantificationParams {
-	marker_channels: string[];
-	background_method: 'rolling_ball' | 'percentile' | 'manual';
-	background_value?: number;
-	condition_names: string[];
-}
-
-export interface QuantificationResult {
-	cell_id: number;
-	condition: string;
-	image: string;
-	area: number;
-	integrated_density: number;
-	mean_intensity: number;
-	ctcf: number;
-	[key: string]: string | number;
+	background_method: string;
+	marker_suffixes: string[];
+	marker_names: string[];
+	mitochondrial_markers: string[];
 }
 
 export interface ResultsPage {
 	page: number;
-	total_pages: number;
+	per_page: number;
 	total_rows: number;
-	rows: QuantificationResult[];
+	total_pages: number;
+	columns: string[];
+	data: Record<string, unknown>[];
 }
 
 export interface ResultsSummary {
 	total_cells: number;
-	conditions: string[];
-	mean_ctcf_by_condition: Record<string, number>;
-	median_ctcf_by_condition: Record<string, number>;
+	n_conditions: number;
+	n_image_sets: number;
+	per_condition: Record<string, unknown>[];
 }
 
 // ── Progress / WebSocket ─────────────────────────────────

@@ -1,31 +1,95 @@
 <script lang="ts">
-	import { Calculator, Play } from 'lucide-svelte';
+	import { onDestroy } from 'svelte';
+	import { Calculator, Play, RotateCcw } from 'lucide-svelte';
 	import { runQuantification } from '$api/client';
+	import { ProgressSocket } from '$api/websocket';
+	import type { ProgressMessage } from '$api/types';
 	import { sessionId } from '$stores/session';
-	import { conditionNames } from '$stores/experiment';
+	import { detection } from '$stores/experiment';
 	import { quantTaskId } from '$stores/quantification';
-	import { progressPercent, progressMessage } from '$stores/progress';
+	import TaskStatus from '$components/progress/TaskStatus.svelte';
 
-	let bgMethod = $state<'rolling_ball' | 'percentile' | 'manual'>('rolling_ball');
-	let bgValue = $state(50);
-	let markerChannels = $state<string[]>([]);
+	let bgMethod = $state('median');
 	let running = $state(false);
+	let wsProgress = $state(0);
+	let wsMessage = $state('');
+	let wsStatus = $state('pending');
+	let wsElapsed = $state(0);
+	let wsResult = $state<Record<string, unknown> | null>(null);
+	let socket: ProgressSocket | null = null;
+
+	let markerSuffixes = $derived($detection?.suggested_markers ?? []);
+	let markerNames = $derived(markerSuffixes.map((s: string) => s));
+
+	function connectWebSocket() {
+		if (!$sessionId || socket) return;
+		socket = new ProgressSocket($sessionId);
+		socket.onMessage(handleWSMessage);
+		socket.connect();
+	}
+
+	function disconnectWebSocket() {
+		socket?.disconnect();
+		socket = null;
+	}
+
+	function handleWSMessage(msg: ProgressMessage) {
+		if (msg.task_id && msg.task_id !== $quantTaskId) return;
+
+		if (msg.type === 'progress') {
+			wsProgress = msg.progress ?? 0;
+			wsMessage = msg.message ?? '';
+			wsStatus = 'running';
+			wsElapsed = msg.elapsed_seconds ?? 0;
+		} else if (msg.type === 'task_complete') {
+			wsProgress = 100;
+			wsStatus = msg.status ?? 'complete';
+			wsMessage = msg.message ?? '';
+			wsElapsed = msg.elapsed_seconds ?? 0;
+			wsResult = (msg.data as Record<string, unknown>) ?? null;
+			running = false;
+			disconnectWebSocket();
+		}
+	}
 
 	async function handleRun() {
 		if (!$sessionId) return;
 		running = true;
+		wsProgress = 0;
+		wsMessage = 'Submitting...';
+		wsStatus = 'pending';
+		wsResult = null;
+
+		connectWebSocket();
+
 		try {
 			const { task_id } = await runQuantification($sessionId, {
-				marker_channels: markerChannels,
 				background_method: bgMethod,
-				background_value: bgMethod === 'manual' ? bgValue : undefined,
-				condition_names: $conditionNames
+				marker_suffixes: markerSuffixes,
+				marker_names: markerNames,
+				mitochondrial_markers: []
 			});
 			$quantTaskId = task_id;
-		} catch {
+			wsStatus = 'running';
+		} catch (e) {
 			running = false;
+			wsStatus = 'error';
+			wsMessage = e instanceof Error ? e.message : 'Failed to start quantification';
+			disconnectWebSocket();
 		}
 	}
+
+	function handleReset() {
+		$quantTaskId = null;
+		wsProgress = 0;
+		wsMessage = '';
+		wsStatus = 'pending';
+		wsResult = null;
+	}
+
+	onDestroy(() => {
+		disconnectWebSocket();
+	});
 </script>
 
 <div class="page-quantification">
@@ -36,30 +100,29 @@
 
 			<div class="form-grid">
 				<div class="form-field">
-					<label class="field-label font-ui">Background Method</label>
-					<select class="field-input font-ui" bind:value={bgMethod}>
+					<label class="field-label font-ui" for="bg-method">Background Method</label>
+					<select id="bg-method" class="field-input font-ui" bind:value={bgMethod}>
+						<option value="median">Median</option>
 						<option value="rolling_ball">Rolling Ball</option>
 						<option value="percentile">Percentile</option>
-						<option value="manual">Manual Value</option>
 					</select>
 				</div>
 
-				{#if bgMethod === 'manual'}
+				{#if markerSuffixes.length > 0}
 					<div class="form-field">
-						<label class="field-label font-ui">Background Value</label>
-						<input
-							type="number"
-							class="field-input font-mono"
-							bind:value={bgValue}
-							min="0"
-						/>
+						<span class="field-label font-ui">Marker Channels</span>
+						<div class="marker-list font-mono">
+							{#each markerSuffixes as suffix}
+								<span class="marker-tag">{suffix}</span>
+							{/each}
+						</div>
 					</div>
 				{/if}
 
 				<div class="info-card">
 					<h4 class="info-title font-ui">CTCF Formula</h4>
 					<p class="info-formula font-mono">
-						CTCF = IntDen - (Area × Mean BG)
+						CTCF = IntDen - (Area x Mean BG)
 					</p>
 					<p class="info-desc font-ui">
 						Corrected Total Cell Fluorescence removes background contribution
@@ -77,27 +140,33 @@
 					<Play size={16} />
 					Run Quantification
 				</button>
+				{#if !running && wsStatus !== 'pending'}
+					<button class="btn btn-secondary font-ui" onclick={handleReset}>
+						<RotateCcw size={16} />
+						Reset
+					</button>
+				{/if}
 			</div>
 		</section>
 
-		<!-- Progress Panel -->
+		<!-- Status Panel -->
 		<section class="panel">
 			<h2 class="section-header">Status</h2>
 
-			{#if running}
-				<div class="progress-section">
-					<div class="progress-info font-ui">
-						<span>{$progressMessage || 'Quantifying...'}</span>
-						<span class="font-mono">{Math.round($progressPercent)}%</span>
-					</div>
-					<div class="progress-track">
-						<div class="progress-fill" style="width: {$progressPercent}%"></div>
-					</div>
-				</div>
+			{#if $quantTaskId}
+				<TaskStatus
+					taskId={$quantTaskId}
+					status={wsStatus}
+					progress={wsProgress}
+					message={wsMessage}
+					elapsed={wsElapsed}
+					result={wsResult}
+				/>
 			{:else}
 				<div class="placeholder font-ui">
 					<Calculator size={48} strokeWidth={1} />
 					<p>Configure settings and run quantification</p>
+					<p class="hint">Results will appear on the Results page</p>
 				</div>
 			{/if}
 		</section>
@@ -169,6 +238,20 @@
 		box-shadow: 0 0 0 3px var(--accent-soft);
 	}
 
+	.marker-list {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.marker-tag {
+		font-size: 11px;
+		padding: 4px 10px;
+		background: var(--accent-soft);
+		color: var(--accent);
+		border-radius: var(--radius-pill);
+	}
+
 	.info-card {
 		background: var(--bg);
 		border: 1px solid var(--border);
@@ -200,6 +283,8 @@
 	}
 
 	.action-row {
+		display: flex;
+		gap: 10px;
 		margin-top: 24px;
 	}
 
@@ -235,16 +320,15 @@
 		transform: translateY(-1px);
 	}
 
-	.progress-section {
-		padding: 20px 0;
+	.btn-secondary {
+		background: var(--bg);
+		color: var(--text);
+		border: 1px solid var(--border);
 	}
 
-	.progress-info {
-		display: flex;
-		justify-content: space-between;
-		font-size: 12px;
-		color: var(--text-muted);
-		margin-bottom: 6px;
+	.btn-secondary:hover {
+		border-color: var(--accent);
+		color: var(--accent);
 	}
 
 	.placeholder {
@@ -256,6 +340,11 @@
 	.placeholder p {
 		margin-top: 12px;
 		font-size: 13px;
+	}
+
+	.placeholder .hint {
+		font-size: 11px;
+		margin-top: 4px;
 	}
 
 	@media (max-width: 800px) {
