@@ -20,6 +20,17 @@ from cellquant.api.routers import (
     ws,
 )
 
+from cellquant.plugins.registry import PluginRegistry
+
+
+def _register_default_plugins(registry: PluginRegistry) -> None:
+    """Register the built-in FUSION plugins."""
+    from cellquant.plugins.oxytrack import OxyTrackPlugin
+    from cellquant.plugins.senescencedb import SenescenceDBPlugin
+
+    registry.register(OxyTrackPlugin())
+    registry.register(SenescenceDBPlugin())
+
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -46,6 +57,24 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix=prefix)
     app.include_router(napari.router, prefix=prefix)
     app.include_router(ws.router, prefix=prefix)
+
+    # FUSION plugins
+    plugin_registry = PluginRegistry()
+    _register_default_plugins(plugin_registry)
+    plugin_registry.mount_all(app, prefix=f"{prefix}/plugins")
+
+    # Plugin listing endpoint
+    @app.get("/api/v1/plugins", tags=["plugins"])
+    async def list_plugins():
+        return [
+            {
+                "name": m.name,
+                "slug": m.slug,
+                "version": m.version,
+                "description": m.description,
+            }
+            for m in plugin_registry.list_plugins()
+        ]
 
     # Health check
     @app.get("/api/health")
