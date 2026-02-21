@@ -1729,6 +1729,17 @@ def create_results_tab():
 def create_app():
     """Create the CellQuant Gradio application."""
 
+    # Register FUSION plugins
+    from cellquant_enterprise.plugins.base import get_registry
+    from cellquant_enterprise.plugins.oxytrack import OxyTrackPlugin
+    from cellquant_enterprise.plugins.senescence_db import SenescenceDBPlugin
+
+    fusion_registry = get_registry()
+    if not fusion_registry.get("oxytrack"):
+        fusion_registry.register(OxyTrackPlugin())
+    if not fusion_registry.get("senescence_db"):
+        fusion_registry.register(SenescenceDBPlugin())
+
     with gr.Blocks(title="CellQuant") as app:
 
         # Header with theme toggle
@@ -1751,10 +1762,13 @@ def create_app():
             with gr.Tab("Results", id="tab-results"):
                 results_components = create_results_tab()
 
+            # FUSION plugin tabs
+            fusion_components = fusion_registry.create_all_tabs()
+
         # Footer
         gr.HTML(f"""
             <div class="app-footer">
-                CellQuant v{APP_VERSION} | Vectorized CTCF | Batch GPU Segmentation | Napari ROI Editor
+                CellQuant v{APP_VERSION} | Vectorized CTCF | Batch GPU Segmentation | FUSION Plugins
             </div>
         """)
 
