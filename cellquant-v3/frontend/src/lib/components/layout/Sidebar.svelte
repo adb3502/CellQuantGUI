@@ -9,7 +9,9 @@
 		Calculator,
 		BarChart3,
 		PanelLeftClose,
-		PanelLeftOpen
+		PanelLeftOpen,
+		Users,
+		Clock
 	} from 'lucide-svelte';
 
 	const navItems = [
@@ -18,7 +20,9 @@
 		{ href: '/tracking', label: 'Tracking', icon: Route },
 		{ href: '/editor', label: 'Mask Editor', icon: PenTool },
 		{ href: '/quantification', label: 'Quantification', icon: Calculator },
-		{ href: '/results', label: 'Results', icon: BarChart3 }
+		{ href: '/results', label: 'Results', icon: BarChart3 },
+		{ href: '/bharat', label: 'BHARAT', icon: Users, separator: true },
+		{ href: '/bharat/aging-clock', label: 'AgingClock', icon: Clock }
 	];
 
 	let collapsed = $derived($sidebarCollapsed);
@@ -49,6 +53,13 @@
 	<ul class="sidebar-nav">
 		{#each navItems as item}
 			{@const active = currentPath.startsWith(item.href)}
+			{#if item.separator}
+				<li class="sidebar-separator" aria-hidden="true">
+					{#if !collapsed}
+						<span class="separator-label font-ui">Cohort Analytics</span>
+					{/if}
+				</li>
+			{/if}
 			<li>
 				<a
 					href={item.href}
@@ -196,6 +207,22 @@
 		border-radius: 50%;
 		background: var(--accent);
 		margin-left: auto;
+	}
+
+	.sidebar-separator {
+		margin: 8px 0 4px;
+		padding: 0 12px;
+		list-style: none;
+	}
+
+	.separator-label {
+		font-size: 9px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-faint);
+		border-top: 1px solid var(--border);
+		display: block;
+		padding-top: 8px;
 	}
 
 	.sidebar-footer {

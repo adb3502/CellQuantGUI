@@ -17,7 +17,9 @@
 		'/tracking': 'Cell Tracking',
 		'/editor': 'Mask Editor',
 		'/quantification': 'Quantification',
-		'/results': 'Results & Export'
+		'/results': 'Results & Export',
+		'/bharat': 'BHARAT Cohort Analytics',
+		'/bharat/aging-clock': 'AgingClock India'
 	};
 
 	let pageTitle = $derived(pageTitles[$page.url.pathname] ?? 'CellQuant');

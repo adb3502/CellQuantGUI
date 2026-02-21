@@ -18,6 +18,7 @@ from cellquant.api.routers import (
     export,
     napari,
     ws,
+    bharat,
 )
 
 
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix=prefix)
     app.include_router(napari.router, prefix=prefix)
     app.include_router(ws.router, prefix=prefix)
+    app.include_router(bharat.router, prefix=prefix)
 
     # Health check
     @app.get("/api/health")
