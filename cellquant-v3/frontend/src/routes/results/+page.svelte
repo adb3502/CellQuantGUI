@@ -1,12 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { BarChart3, FileSpreadsheet, FileText } from 'lucide-svelte';
-	import { getResultsPage, getResultsSummary, exportCsv, exportExcel } from '$api/client';
+	import { BarChart3, FileSpreadsheet, FileText, AlertTriangle } from 'lucide-svelte';
+	import { getResultsPage, getResultsSummary, getQCSummary, exportCsv, exportExcel } from '$api/client';
 	import { sessionId } from '$stores/session';
-	import { resultsPage, quantSummary } from '$stores/quantification';
+	import { resultsPage, quantSummary, qcSummary } from '$stores/quantification';
 
-	let activeTab = $state<'table' | 'boxplot' | 'scatter' | 'histogram'>('table');
+	type TabId = 'table' | 'boxplot' | 'scatter' | 'histogram' | 'spatial' | 'qcsummary' | 'perfov';
+	let activeTab = $state<TabId>('table');
 	let loading = $state(false);
+	let showFlagged = $state(true);
 
 	let columns = $derived($resultsPage?.columns ?? []);
 	let rows = $derived($resultsPage?.data ?? []);
@@ -14,17 +16,33 @@
 	let totalPages = $derived($resultsPage?.total_pages ?? 0);
 	let totalRows = $derived($resultsPage?.total_rows ?? 0);
 
-	const tabs = [
-		{ id: 'table' as const, label: 'Data Table' },
-		{ id: 'boxplot' as const, label: 'Box Plot' },
-		{ id: 'scatter' as const, label: 'Scatter' },
-		{ id: 'histogram' as const, label: 'Histogram' }
+	// Detect quality flag columns
+	let flagColumns = $derived(columns.filter(c =>
+		c.startsWith('is_outlier_') || c === 'is_saturated' || c === 'is_dim' || c === 'low_confidence_background'
+	));
+	let hasFlaggedRows = $derived(rows.some(r =>
+		flagColumns.some(c => r[c] === true)
+	));
+
+	const tabs: { id: TabId; label: string }[] = [
+		{ id: 'table', label: 'Data Table' },
+		{ id: 'boxplot', label: 'Box Plot' },
+		{ id: 'scatter', label: 'Scatter' },
+		{ id: 'histogram', label: 'Histogram' },
+		{ id: 'spatial', label: 'Spatial Map' },
+		{ id: 'qcsummary', label: 'QC Summary' },
+		{ id: 'perfov', label: 'Per-FOV' }
 	];
+
+	// QC Summary data
+	let summaryRows = $derived($qcSummary?.summary ?? []);
+	let fovRows = $derived($qcSummary?.fov_data ?? []);
 
 	onMount(() => {
 		if ($sessionId && !$resultsPage) {
 			loadPage(0);
 			loadSummary();
+			loadQCSummary();
 		}
 	});
 
@@ -48,13 +66,31 @@
 		}
 	}
 
+	async function loadQCSummary() {
+		if (!$sessionId) return;
+		try {
+			$qcSummary = await getQCSummary($sessionId);
+		} catch {
+			// No results yet
+		}
+	}
+
 	function formatValue(val: unknown): string {
 		if (val == null) return '--';
+		if (typeof val === 'boolean') return val ? 'Yes' : 'No';
 		if (typeof val === 'number') {
 			if (Number.isInteger(val)) return val.toLocaleString();
 			return val.toFixed(2);
 		}
 		return String(val);
+	}
+
+	function isFlaggedRow(row: Record<string, unknown>): boolean {
+		return flagColumns.some(c => row[c] === true);
+	}
+
+	function isFlagColumn(col: string): boolean {
+		return col.startsWith('is_outlier_') || col === 'is_saturated' || col === 'is_dim';
 	}
 
 	async function renderChart(tab: string) {
@@ -115,14 +151,69 @@
 				xaxis: { ...layout.xaxis, title: ctcfCol },
 				yaxis: { ...layout.yaxis, title: 'Count' }
 			});
+		} else if (tab === 'spatial') {
+			const hasXY = columns.includes('x_centroid') && columns.includes('y_centroid');
+			if (!hasXY) return;
+
+			const ctcfValues = rows.map(r => Number(r[ctcfCol]) || 0);
+			const trace = {
+				x: rows.map((r) => Number(r['x_centroid']) || 0),
+				y: rows.map((r) => Number(r['y_centroid']) || 0),
+				mode: 'markers' as const,
+				type: 'scatter' as const,
+				marker: {
+					color: ctcfValues,
+					colorscale: 'Viridis',
+					size: 5,
+					opacity: 0.8,
+					colorbar: { title: ctcfCol, titlefont: { size: 11 } }
+				},
+				text: rows.map((r, i) => `Cell ${r['CellID']}<br>${ctcfCol}: ${ctcfValues[i].toFixed(1)}`),
+				hoverinfo: 'text' as const,
+			};
+			Plotly.newPlot('plotly-spatial', [trace], {
+				...layout,
+				title: 'Spatial CTCF Map',
+				xaxis: { ...layout.xaxis, title: 'X (px)', scaleanchor: 'y' },
+				yaxis: { ...layout.yaxis, title: 'Y (px)', autorange: 'reversed' as const }
+			});
+		} else if (tab === 'perfov') {
+			if (fovRows.length === 0) return;
+
+			// Find median CTCF columns in FOV data
+			const medCols = Object.keys(fovRows[0] || {}).filter(k => k.endsWith('_median_CTCF'));
+			const medCol = medCols[0];
+			if (!medCol) return;
+
+			const conditions = [...new Set(fovRows.map(r => String(r['Condition'])))];
+			const traces = conditions.map(cond => ({
+				y: fovRows.filter(r => String(r['Condition']) === cond).map(r => Number(r[medCol]) || 0),
+				type: 'box' as const,
+				name: cond,
+				marker: { color: accent },
+				boxpoints: 'all' as const,
+				jitter: 0.3,
+				pointpos: -1.5,
+			}));
+			Plotly.newPlot('plotly-perfov', traces, {
+				...layout,
+				title: 'Per-FOV Median CTCF',
+				yaxis: { ...layout.yaxis, title: medCol }
+			});
 		}
 	}
 
 	$effect(() => {
-		if (activeTab !== 'table' && rows.length > 0) {
-			// Render chart after DOM update
+		if (activeTab !== 'table' && activeTab !== 'qcsummary' && rows.length > 0) {
 			setTimeout(() => renderChart(activeTab), 50);
 		}
+	});
+
+	// Compute outlier count from summary
+	let outlierCount = $derived.by(() => {
+		if (!$quantSummary) return 0;
+		// Check if wsResult has outliers_flagged from the task
+		return 0;
 	});
 </script>
 
@@ -160,8 +251,16 @@
 			<FileSpreadsheet size={14} />
 			Excel
 		</button>
+
+		{#if hasFlaggedRows}
+			<label class="toggle-flagged font-ui">
+				<input type="checkbox" bind:checked={showFlagged} />
+				Show flagged rows
+			</label>
+		{/if}
+
 		{#if totalRows > 0}
-			<button class="export-btn refresh-btn font-ui" onclick={() => { loadPage(0); loadSummary(); }}>
+			<button class="export-btn refresh-btn font-ui" onclick={() => { loadPage(0); loadSummary(); loadQCSummary(); }}>
 				Refresh
 			</button>
 		{/if}
@@ -189,17 +288,24 @@
 						<thead>
 							<tr>
 								{#each columns as col}
-									<th class="font-ui">{col}</th>
+									<th class="font-ui" class:flag-col={isFlagColumn(col)}>{col}</th>
 								{/each}
 							</tr>
 						</thead>
 						<tbody>
 							{#each rows as row}
-								<tr>
-									{#each columns as col}
-										<td class="font-mono">{formatValue(row[col])}</td>
-									{/each}
-								</tr>
+								{#if showFlagged || !isFlaggedRow(row)}
+									<tr class:flagged-row={isFlaggedRow(row)}>
+										{#each columns as col}
+											<td
+												class="font-mono"
+												class:flag-cell={isFlagColumn(col) && row[col] === true}
+											>
+												{formatValue(row[col])}
+											</td>
+										{/each}
+									</tr>
+								{/if}
 							{/each}
 						</tbody>
 					</table>
@@ -255,6 +361,68 @@
 					<div class="placeholder font-ui">
 						<BarChart3 size={48} strokeWidth={1} />
 						<p>CTCF value distribution</p>
+					</div>
+				{/if}
+			</div>
+		{:else if activeTab === 'spatial'}
+			<div class="chart-container" id="plotly-spatial">
+				{#if rows.length === 0}
+					<div class="placeholder font-ui">
+						<BarChart3 size={48} strokeWidth={1} />
+						<p>Spatial map of cell centroids colored by CTCF</p>
+					</div>
+				{:else if !columns.includes('x_centroid')}
+					<div class="placeholder font-ui">
+						<AlertTriangle size={48} strokeWidth={1} />
+						<p>Spatial data not available (QC filters may need to be enabled)</p>
+					</div>
+				{/if}
+			</div>
+		{:else if activeTab === 'qcsummary'}
+			<div class="table-container">
+				{#if summaryRows.length > 0}
+					<table class="results-table">
+						<thead>
+							<tr>
+								<th class="font-ui">Condition</th>
+								<th class="font-ui">Marker</th>
+								<th class="font-ui">N Cells</th>
+								<th class="font-ui">N FOVs</th>
+								<th class="font-ui">Mean (FOV Medians)</th>
+								<th class="font-ui">SD</th>
+								<th class="font-ui">CV%</th>
+								<th class="font-ui">SEM</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each summaryRows as row}
+								<tr>
+									<td class="font-mono">{row['Condition']}</td>
+									<td class="font-mono">{row['Marker']}</td>
+									<td class="font-mono">{formatValue(row['N_cells'])}</td>
+									<td class="font-mono">{formatValue(row['N_FOVs'])}</td>
+									<td class="font-mono">{formatValue(row['mean_of_fov_medians'])}</td>
+									<td class="font-mono">{formatValue(row['sd_of_fov_medians'])}</td>
+									<td class="font-mono">{formatValue(row['cv_percent'])}</td>
+									<td class="font-mono">{formatValue(row['sem'])}</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				{:else}
+					<div class="placeholder font-ui">
+						<BarChart3 size={48} strokeWidth={1} />
+						<p>Hierarchical summary (Cells → FOVs → Conditions)</p>
+						<p class="hint">Run quantification to generate QC summary</p>
+					</div>
+				{/if}
+			</div>
+		{:else if activeTab === 'perfov'}
+			<div class="chart-container" id="plotly-perfov">
+				{#if fovRows.length === 0}
+					<div class="placeholder font-ui">
+						<BarChart3 size={48} strokeWidth={1} />
+						<p>Per-FOV median CTCF distribution</p>
 					</div>
 				{/if}
 			</div>
@@ -343,10 +511,25 @@
 		margin-left: auto;
 	}
 
+	.toggle-flagged {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 12px;
+		color: var(--text-muted);
+		cursor: pointer;
+		margin-left: 12px;
+	}
+
+	.toggle-flagged input {
+		accent-color: var(--accent);
+	}
+
 	.tab-bar {
 		display: flex;
 		gap: 0;
 		border-bottom: 1px solid var(--border);
+		overflow-x: auto;
 	}
 
 	.tab-btn {
@@ -359,6 +542,7 @@
 		font-weight: 400;
 		cursor: pointer;
 		transition: all 0.2s ease;
+		white-space: nowrap;
 	}
 
 	.tab-btn:hover {
@@ -411,11 +595,20 @@
 		white-space: nowrap;
 	}
 
+	.results-table thead th.flag-col {
+		background: linear-gradient(180deg, #b44, #844);
+	}
+
 	:global(.dark) .results-table thead th {
 		background: var(--bg);
 		color: var(--text-muted);
 		font-weight: 500;
 		border-bottom: 1px solid var(--border);
+	}
+
+	:global(.dark) .results-table thead th.flag-col {
+		background: var(--bg);
+		color: #f88;
 	}
 
 	.results-table tbody td {
@@ -426,8 +619,22 @@
 		white-space: nowrap;
 	}
 
+	.results-table tbody td.flag-cell {
+		background: rgba(255, 60, 60, 0.15);
+		color: #e44;
+		font-weight: 600;
+	}
+
+	.results-table tbody tr.flagged-row td:first-child {
+		border-left: 3px solid #e44;
+	}
+
 	.results-table tbody tr:nth-child(even) td {
 		background: rgba(212, 165, 165, 0.06);
+	}
+
+	.results-table tbody tr.flagged-row:nth-child(even) td.flag-cell {
+		background: rgba(255, 60, 60, 0.15);
 	}
 
 	:global(.dark) .results-table tbody tr:nth-child(even) td {
@@ -488,5 +695,10 @@
 	.placeholder p {
 		margin-top: 12px;
 		font-size: 13px;
+	}
+
+	.placeholder .hint {
+		font-size: 11px;
+		margin-top: 4px;
 	}
 </style>

@@ -22,23 +22,46 @@ export interface DetectionResult {
 	n_image_sets: number;
 	n_complete: number;
 	n_incomplete: number;
-	confidence: number;
 	suggested_nuclear?: string;
 	suggested_cyto?: string;
 	suggested_markers: string[];
+	channel_wavelengths?: Record<string, number>;  // suffix -> nm
+	channel_colors?: Record<string, string>;       // suffix -> hex from wavelength
 }
 
 export interface ScanResponse {
 	session_id: string;
 	conditions: ConditionInfo[];
 	detection?: DetectionResult;
+	output_path?: string;
 }
 
 export interface ChannelConfig {
 	nuclear_suffix?: string;
 	cyto_suffix?: string;
 	marker_suffixes: string[];
+	marker_names?: string[];
+	mitochondrial_markers?: string[];
 }
+
+/** Per-channel UI state for the experiment page */
+export interface ChannelRole {
+	suffix: string;
+	role: 'nuclear' | 'whole_cell' | 'marker';
+	name: string;
+	color: string; // hex color for LUT, e.g. '#00AAFF'
+	useForSegmentation: boolean;
+	quantify: boolean;
+	isMitochondrial: boolean;
+	excluded: boolean;
+}
+
+/** Default LUT colors by role */
+export const DEFAULT_CHANNEL_COLORS: Record<ChannelRole['role'], string> = {
+	nuclear: '#4488FF',    // Blue (DAPI/Hoechst)
+	whole_cell: '#FFFFFF',  // Grayscale (transmitted light)
+	marker: '#00CC44',     // Green (fluorescent markers)
+};
 
 // ── Segmentation ─────────────────────────────────────────
 
@@ -51,6 +74,7 @@ export interface SegmentationParams {
 	channels: [number, number];
 	use_gpu: boolean;
 	batch_size: number;
+	skip_existing?: boolean;
 }
 
 export interface SegmentationStatus {
@@ -88,11 +112,27 @@ export interface CellInfo {
 
 // ── Quantification ───────────────────────────────────────
 
+export interface QCFilterParams {
+	enabled: boolean;
+	remove_border_objects: boolean;
+	min_area: number | null;
+	max_area: number | null;
+	area_iqr_factor: number;
+	min_solidity: number | null;
+	max_eccentricity: number | null;
+	min_circularity: number | null;
+	max_aspect_ratio: number | null;
+}
+
 export interface QuantificationParams {
 	background_method: string;
 	marker_suffixes: string[];
 	marker_names: string[];
 	mitochondrial_markers: string[];
+	qc_filters?: QCFilterParams;
+	negative_control_path?: string | null;
+	manual_background_value?: number | null;
+	outlier_threshold?: number;
 }
 
 export interface ResultsPage {
@@ -109,6 +149,28 @@ export interface ResultsSummary {
 	n_conditions: number;
 	n_image_sets: number;
 	per_condition: Record<string, unknown>[];
+}
+
+export interface QCSummary {
+	summary: Record<string, unknown>[];
+	fov_data: Record<string, unknown>[];
+}
+
+// ── Mask Status ─────────────────────────────────────────
+
+export interface ConditionMaskStatus {
+	name: string;
+	mask_count: number;
+	base_names: string[];
+}
+
+export interface MaskStatusResponse {
+	conditions: ConditionMaskStatus[];
+	total_masks: number;
+	expected_total: number;
+	is_complete: boolean;
+	has_results: boolean;
+	results_n_cells: number;
 }
 
 // ── Progress / WebSocket ─────────────────────────────────
@@ -128,6 +190,7 @@ export interface ProgressMessage {
 	elapsed_seconds?: number;
 	data?: Record<string, unknown>;
 	error?: string;
+	logs?: string[];
 }
 
 // ── Images / Tiles ───────────────────────────────────────

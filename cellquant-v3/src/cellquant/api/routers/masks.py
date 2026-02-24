@@ -1,7 +1,7 @@
 """Mask viewing and editing endpoints."""
 
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from cellquant.api.dependencies import get_session
@@ -38,6 +38,80 @@ async def get_mask_stats(session_id: str, condition: str, base_name: str):
         min_area=float(np.min(areas)),
         max_area=float(np.max(areas)),
         mean_area=float(np.mean(areas)),
+    )
+
+
+@router.get("/{session_id}/{condition}/{base_name}/render")
+async def render_mask_overlay(
+    session_id: str,
+    condition: str,
+    base_name: str,
+    size: int = Query(default=800, ge=100, le=4096),
+    style: str = Query(default="filled", pattern="^(filled|outline)$"),
+    bg: str = Query(default="composite", pattern="^(composite|cyto)$"),
+):
+    """Render mask overlay on a background image.
+
+    style=filled: colored fill overlay (default)
+    style=outline: red cell boundary outlines
+    bg=composite: all channels summed (default)
+    bg=cyto: cytoplasm channel only
+    """
+    import numpy as np
+    from PIL import Image
+    from cellquant.tiles.thumbnail import imagej_auto_contrast
+    from cellquant.core.segmentation.cellpose_engine import (
+        _create_simple_overlay, _create_outline_overlay,
+    )
+    from cellquant.core.io.image_loader import load_image
+
+    session = get_session(session_id)
+    masks = _get_masks(session, condition, base_name)
+
+    cond_data = session.conditions.get(condition, {})
+    image_sets = cond_data.get("image_sets", {})
+    channels = image_sets.get(base_name, {})
+    if not channels:
+        raise HTTPException(404, f"No channels found: {condition}/{base_name}")
+
+    # Check cache (keyed by style + bg + size)
+    cache_dir = session.directory / "renders" / condition / base_name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"mask_{style}_{bg}_{size}.jpg"
+
+    if not cache_path.exists():
+        if bg == "cyto":
+            # Single cyto channel
+            cyto_suffix = cond_data.get("cyto_suffix", "C1")
+            cyto_path = channels.get(cyto_suffix) or channels.get(cyto_suffix.upper())
+            if not cyto_path or not Path(cyto_path).exists():
+                raise HTTPException(404, f"Cyto channel not found: {condition}/{base_name}")
+            bg_img = load_image(cyto_path)
+        else:
+            # Composite: sum all channels
+            loaded = []
+            for suffix, ch_path in channels.items():
+                if ch_path and Path(ch_path).exists():
+                    loaded.append(load_image(ch_path).astype(np.float64))
+            if not loaded:
+                raise HTTPException(404, f"No channel images found: {condition}/{base_name}")
+            bg_img = loaded[0] if len(loaded) == 1 else np.sum(np.stack(loaded, axis=0), axis=0)
+
+        bg_uint8 = imagej_auto_contrast(bg_img)
+
+        if style == "outline":
+            overlay = _create_outline_overlay(bg_uint8, masks)
+        else:
+            overlay = _create_simple_overlay(bg_uint8, masks, alpha=0.5)
+        pil_img = Image.fromarray(overlay, mode="RGB")
+        if max(pil_img.size) > size:
+            pil_img.thumbnail((size, size), Image.LANCZOS)
+        pil_img.save(cache_path, "JPEG", quality=90)
+
+    return FileResponse(
+        cache_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=60"},
     )
 
 

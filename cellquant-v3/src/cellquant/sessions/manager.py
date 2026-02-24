@@ -18,9 +18,12 @@ class SessionManager:
         self._sessions: Dict[str, Session] = {}
         self._last_access: Dict[str, float] = {}
 
-    def create_session(self) -> Session:
+    def create_session(self, output_dir: Path | None = None) -> Session:
         session_id = uuid.uuid4().hex[:8]
-        session_dir = self.base_dir / session_id
+        if output_dir is not None:
+            session_dir = output_dir
+        else:
+            session_dir = self.base_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
 
         session = Session(id=session_id, directory=session_dir)

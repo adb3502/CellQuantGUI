@@ -14,6 +14,8 @@ import type {
 	QuantificationParams,
 	ResultsPage,
 	ResultsSummary,
+	QCSummary,
+	MaskStatusResponse,
 	CellInfo,
 	ImageMetadata
 } from './types';
@@ -44,10 +46,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ── Experiments ──────────────────────────────────────────
 
-export async function scanExperiment(folderPath: string): Promise<ScanResponse> {
+export async function browseFolder(): Promise<string | null> {
+	const res = await request<{ path: string | null }>('/experiments/browse', { method: 'POST' });
+	return res.path;
+}
+
+export async function scanExperiment(folderPath: string, outputPath?: string): Promise<ScanResponse> {
 	return request('/experiments/scan', {
 		method: 'POST',
-		body: JSON.stringify({ path: folderPath })
+		body: JSON.stringify({ path: folderPath, output_path: outputPath ?? null })
 	});
 }
 
@@ -62,6 +69,27 @@ export async function configureChannels(
 	await request(`/experiments/${sessionId}/configure`, {
 		method: 'POST',
 		body: JSON.stringify(config)
+	});
+}
+
+export async function setOutputPath(
+	sessionId: string,
+	outputPath: string
+): Promise<{ status: string; output_path: string }> {
+	return request(`/experiments/${sessionId}/set-output`, {
+		method: 'POST',
+		body: JSON.stringify({ output_path: outputPath })
+	});
+}
+
+export async function openResultFolder(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): Promise<void> {
+	await request(`/experiments/${sessionId}/open-folder`, {
+		method: 'POST',
+		body: JSON.stringify({ condition, base_name: baseName })
 	});
 }
 
@@ -96,6 +124,20 @@ export function thumbnailUrl(
 	return `${BASE}/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/thumbnail`;
 }
 
+export function renderUrl(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	channel: string,
+	color?: string
+): string {
+	const base = `${BASE}/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${encodeURIComponent(channel)}/render`;
+	if (color && color !== '#FFFFFF' && color !== '#ffffff') {
+		return `${base}?color=${encodeURIComponent(color)}`;
+	}
+	return base;
+}
+
 export async function getImageMetadata(
 	sessionId: string,
 	condition: string,
@@ -125,6 +167,10 @@ export async function cancelSegmentation(taskId: string): Promise<void> {
 	await request(`/segmentation/cancel/${taskId}`, { method: 'POST' });
 }
 
+export async function getMaskStatus(sessionId: string): Promise<MaskStatusResponse> {
+	return request(`/segmentation/masks/status/${sessionId}`);
+}
+
 // ── Tracking ─────────────────────────────────────────────
 
 export async function runTracking(
@@ -145,6 +191,17 @@ export async function getTrackingSummary(
 }
 
 // ── Masks ────────────────────────────────────────────────
+
+export function maskRenderUrl(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	size: number = 800,
+	style: 'filled' | 'outline' = 'filled',
+	bg: 'composite' | 'cyto' = 'composite'
+): string {
+	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/render?size=${size}&style=${style}&bg=${bg}`;
+}
 
 export function maskTileUrl(
 	sessionId: string,
@@ -228,6 +285,21 @@ export async function getResultsPage(
 
 export async function getResultsSummary(sessionId: string): Promise<ResultsSummary> {
 	return request(`/quantification/summary/${sessionId}`);
+}
+
+export async function getQCSummary(sessionId: string): Promise<QCSummary> {
+	return request(`/quantification/qc-summary/${sessionId}`);
+}
+
+export async function configurePreprocessing(
+	sessionId: string,
+	darkFramePaths: string[],
+	flatFieldPaths: string[]
+): Promise<{ status: string; has_dark: boolean; has_flat: boolean; warnings: string[] }> {
+	return request(`/experiments/${sessionId}/preprocessing`, {
+		method: 'POST',
+		body: JSON.stringify({ dark_frame_paths: darkFramePaths, flat_field_paths: flatFieldPaths })
+	});
 }
 
 // ── Export ────────────────────────────────────────────────

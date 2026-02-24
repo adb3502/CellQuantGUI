@@ -21,19 +21,11 @@ import time
 
 # Core imports
 from cellquant_enterprise.core.io.image_loader import (
-    load_image, normalize_image, find_images_by_suffix, create_composite
+    load_image, normalize_image
 )
-from cellquant_enterprise.core.segmentation.cellpose_engine import (
-    CellposeEngine, SegmentationParams, SegmentationResult
-)
-from cellquant_enterprise.core.quantification.ctcf import (
-    calculate_ctcf_vectorized, quantify_multiple_markers, results_to_dataframe
-)
-from cellquant_enterprise.core.quantification.background import estimate_background
-from cellquant_enterprise.core.io.mask_io import save_mask, load_mask
-from cellquant_enterprise.core.io.roi_export import save_rois_imagej
-from cellquant_enterprise.core.pipeline import (
-    BatchPipeline, ChannelConfig, ExperimentCondition, SegmentationParams as PipelineSegParams
+from cellquant_enterprise.core.io.mask_io import load_mask
+from cellquant_enterprise.core.io.channel_detect import (
+    detect_image_sets, ImageSetDetection
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -708,17 +700,9 @@ class AppState:
     def __init__(self):
         self.experiment_path: Optional[Path] = None
         self.output_path: Optional[Path] = None
-        self.conditions: Dict[str, ExperimentCondition] = {}
-        self.masks: Dict[str, Dict[str, np.ndarray]] = {}
+        self.conditions: Dict[str, dict] = {}  # {name: {name, path, tiff_files, n_images}}
+        self.masks: Dict[str, Dict[str, np.ndarray]] = {}  # {condition: {base_name: masks_array}}
         self.results_df: Optional[pd.DataFrame] = None
-        self.pipeline: Optional[BatchPipeline] = None
-        self.engine: Optional[CellposeEngine] = None
-
-    def get_pipeline(self) -> BatchPipeline:
-        """Get or create the pipeline."""
-        if self.pipeline is None:
-            self.pipeline = BatchPipeline(use_gpu=True)
-        return self.pipeline
 
 
 # Global state instance
@@ -753,65 +737,175 @@ def open_folder_dialog(current_path: str = "") -> str:
 # BACKEND FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def scan_folder(folder_path: str, nuclear_suffix: str, cyto_suffix: str,
-                marker_suffixes_str: str) -> Tuple[pd.DataFrame, str]:
-    """Scan experiment folder for conditions."""
+def detect_conditions(folder_path: str) -> Tuple[pd.DataFrame, str]:
+    """
+    Auto-detect conditions from experiment folder.
+    Uses smart channel detection to identify image sets and channels.
+    """
+    empty_cols = ["Condition", "Image Sets", "Channels", "Suffixes", "Status"]
     if not folder_path or not os.path.isdir(folder_path):
-        return pd.DataFrame(), "Please enter a valid folder path"
+        return pd.DataFrame(columns=empty_cols), ""
 
     folder = Path(folder_path)
     app_state.experiment_path = folder
-
-    # Parse marker suffixes
-    marker_suffixes = [s.strip() for s in marker_suffixes_str.split(',') if s.strip()]
-    all_suffixes = [nuclear_suffix, cyto_suffix] + marker_suffixes
+    app_state.conditions = {}
 
     conditions_data = []
-    app_state.conditions = {}
 
     for subdir in sorted(folder.iterdir()):
         if not subdir.is_dir() or subdir.name.startswith('.'):
             continue
 
-        # Find images grouped by suffix
-        try:
-            image_sets = find_images_by_suffix(subdir, all_suffixes)
-        except Exception:
-            image_sets = {}
+        tiff_files = list(subdir.glob('*.tif')) + list(subdir.glob('*.tiff'))
+        if not tiff_files:
+            continue
 
-        if image_sets:
-            n_images = len(image_sets)
-            conditions_data.append({
-                "Condition": subdir.name,
-                "Images": n_images,
-                "Status": "Ready"
-            })
+        # Smart channel detection
+        detection = detect_image_sets(tiff_files)
 
-            # Store in state
-            config = ChannelConfig(
-                nuclear_suffix=nuclear_suffix,
-                cyto_suffix=cyto_suffix,
-                marker_suffixes=marker_suffixes,
-                marker_names=[f"Marker{i+1}" for i in range(len(marker_suffixes))]
-            )
+        status = "Complete" if detection.n_incomplete == 0 else f"{detection.n_incomplete} incomplete"
+        if detection.n_orphan_files > 0:
+            status += f", {detection.n_orphan_files} orphan"
 
-            app_state.conditions[subdir.name] = ExperimentCondition(
-                name=subdir.name,
-                path=subdir,
-                image_sets=image_sets,
-                channel_config=config,
-                n_images=n_images
-            )
+        conditions_data.append({
+            "Condition": subdir.name,
+            "Image Sets": detection.n_image_sets,
+            "Channels": detection.n_channels,
+            "Suffixes": ", ".join(detection.channel_suffixes),
+            "Status": status,
+        })
+
+        app_state.conditions[subdir.name] = {
+            "name": subdir.name,
+            "path": subdir,
+            "tiff_files": tiff_files,
+            "n_images": detection.n_image_sets,
+            "detection": detection,
+        }
 
     if conditions_data:
         df = pd.DataFrame(conditions_data)
-        total_images = sum(c["Images"] for c in conditions_data)
-        status = f"Found {len(conditions_data)} conditions with {total_images} total images"
+        total_sets = sum(c["Image Sets"] for c in conditions_data)
+        total_conds = len(conditions_data)
+        # Get channel info from first condition
+        first_det = list(app_state.conditions.values())[0]["detection"]
+        ch_info = f", {first_det.n_channels}ch ({', '.join(first_det.channel_suffixes)})"
+        status = f"Found {total_conds} conditions, {total_sets} image sets{ch_info}"
     else:
-        df = pd.DataFrame(columns=["Condition", "Images", "Status"])
-        status = "No conditions found. Check folder structure."
+        df = pd.DataFrame(columns=empty_cols)
+        status = "No subfolders with TIFF images found"
 
     return df, status
+
+
+def _get_first_detection() -> Optional[ImageSetDetection]:
+    """Get the detection result from the first condition (for channel suggestions)."""
+    for cond in app_state.conditions.values():
+        det = cond.get("detection")
+        if det and det.n_channels > 0:
+            return det
+    return None
+
+
+def browse_and_detect(current_path: str):
+    """
+    Open native folder dialog, then auto-detect conditions.
+    Returns: folder_path, conditions_table, status,
+             nuclear_ch_update, cyto_ch_update, marker_suffixes_update, marker_names_update,
+             advanced_html, image_sets_table, orphan_text
+    """
+    folder = open_folder_dialog(current_path)
+    if not folder or not os.path.isdir(folder):
+        empty_cols = ["Condition", "Image Sets", "Channels", "Suffixes", "Status"]
+        return (
+            current_path,
+            pd.DataFrame(columns=empty_cols),
+            "",
+            gr.update(), gr.update(), gr.update(), gr.update(),
+            "", pd.DataFrame(), "",
+        )
+
+    df, status = detect_conditions(folder)
+
+    # Auto-populate channel config from first condition's detection
+    det = _get_first_detection()
+    if det:
+        suffixes_plus_none = ["None"] + det.channel_suffixes
+
+        nuc_update = gr.update(
+            choices=suffixes_plus_none,
+            value=det.suggested_nuclear or "None"
+        )
+        cyto_update = gr.update(
+            choices=suffixes_plus_none,
+            value=det.suggested_cyto or "None"
+        )
+        marker_update = gr.update(
+            choices=det.channel_suffixes,
+            value=det.suggested_markers
+        )
+        # Default marker names based on suggested markers
+        marker_names_val = ", ".join(
+            f"Marker{i+1}" for i in range(len(det.suggested_markers))
+        )
+        marker_names_update = gr.update(value=marker_names_val)
+
+        # Build advanced info
+        adv_html = _build_advanced_summary(det)
+        sets_df = _build_image_sets_table(det)
+        orphan_txt = "\n".join(str(f) for f in det.orphan_files) if det.orphan_files else ""
+    else:
+        nuc_update = gr.update()
+        cyto_update = gr.update()
+        marker_update = gr.update()
+        marker_names_update = gr.update()
+        adv_html = ""
+        sets_df = pd.DataFrame()
+        orphan_txt = ""
+
+    return (
+        folder, df, status,
+        nuc_update, cyto_update, marker_update, marker_names_update,
+        adv_html, sets_df, orphan_txt,
+    )
+
+
+def _build_advanced_summary(det: ImageSetDetection) -> str:
+    """Build HTML summary for the Advanced Settings accordion."""
+    conf_pct = int(det.confidence * 100)
+    badge_cls = "success" if conf_pct >= 80 else "pending" if conf_pct >= 50 else "error"
+    return f"""
+    <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+        <span>Detected <strong>{det.n_channels}</strong> channels
+        (<code>{', '.join(det.channel_suffixes)}</code>)
+        across <strong>{det.n_image_sets}</strong> image sets</span>
+        <span class="status-badge {badge_cls}">Confidence: {conf_pct}%</span>
+        {f'<span class="status-badge error">{det.n_incomplete} incomplete</span>' if det.n_incomplete else ''}
+        {f'<span class="status-badge pending">{det.n_orphan_files} orphan files</span>' if det.n_orphan_files else ''}
+    </div>
+    """
+
+
+def _build_image_sets_table(det: ImageSetDetection) -> pd.DataFrame:
+    """Build a DataFrame showing each image set and its channel completeness."""
+    if not det.image_sets:
+        return pd.DataFrame()
+
+    rows = []
+    for base_name in sorted(det.image_sets.keys()):
+        channels = det.image_sets[base_name]
+        row = {"Image Set": base_name}
+        all_present = True
+        for suffix in det.channel_suffixes:
+            if suffix in channels:
+                row[suffix] = "OK"
+            else:
+                row[suffix] = "--"
+                all_present = False
+        row["Status"] = "Complete" if all_present else "Incomplete"
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 def load_preview_image(folder_path: str, nuclear_suffix: str) -> Optional[np.ndarray]:
@@ -838,81 +932,117 @@ def load_preview_image(folder_path: str, nuclear_suffix: str) -> Optional[np.nda
 
 
 def run_segmentation(
+    nuclear_suffix: str,
+    cyto_suffix: str,
     model_type: str,
     diameter: float,
     flow_threshold: float,
     min_size: int,
     progress=gr.Progress()
 ) -> Tuple[str, Optional[np.ndarray]]:
-    """Run batch segmentation on all conditions."""
+    """Run batch segmentation using pre-computed detection results."""
     if not app_state.conditions:
-        return "No conditions loaded. Please scan a folder first.", None
+        return "No conditions loaded. Browse for a folder first.", None
+
+    # Handle "None" dropdown values
+    nuc_sfx = nuclear_suffix if nuclear_suffix and nuclear_suffix != "None" else None
+    cyto_sfx = cyto_suffix if cyto_suffix and cyto_suffix != "None" else None
+
+    if not nuc_sfx and not cyto_sfx:
+        return "Select at least one channel (Nuclear or Cytoplasm) for segmentation.", None
 
     try:
-        # Initialize engine
+        from cellpose.models import CellposeModel
         progress(0, desc="Initializing Cellpose...")
-        engine = CellposeEngine(
-            model_type=model_type,
-            use_gpu=True
-        )
-        app_state.engine = engine
-
-        total_images = sum(c.n_images for c in app_state.conditions.values())
-        processed = 0
-        app_state.masks = {}
-
-        preview_overlay = None
-
-        for cond_name, condition in app_state.conditions.items():
-            app_state.masks[cond_name] = {}
-            config = condition.channel_config
-
-            for base_name, image_paths in condition.image_sets.items():
-                progress(processed / total_images, desc=f"Segmenting {cond_name}/{base_name}...")
-
-                # Load nuclear and cyto channels
-                nuclear_path = image_paths.get(config.nuclear_suffix.upper())
-                cyto_path = image_paths.get(config.cyto_suffix.upper())
-
-                if not nuclear_path:
-                    processed += 1
-                    continue
-
-                nuclear_img = load_image(nuclear_path)
-                nuclear_norm = normalize_image(nuclear_img)
-
-                if cyto_path:
-                    cyto_img = load_image(cyto_path)
-                    cyto_norm = normalize_image(cyto_img)
-                    seg_input = np.stack([nuclear_norm, cyto_norm], axis=0)
-                else:
-                    seg_input = nuclear_norm
-
-                # Run segmentation
-                result = engine.segment_single(
-                    seg_input,
-                    diameter=diameter,
-                    flow_threshold=flow_threshold,
-                    min_size=min_size
-                )
-
-                app_state.masks[cond_name][base_name] = result.masks
-
-                # Create preview from first image
-                if preview_overlay is None and result.masks.max() > 0:
-                    preview_overlay = CellposeEngine.create_overlay(seg_input, result.masks)
-
-                processed += 1
-
-        total_cells = sum(
-            m.max() for cond_masks in app_state.masks.values()
-            for m in cond_masks.values()
-        )
-
-        return f"Segmentation complete! {total_images} images, ~{total_cells} cells detected", preview_overlay
-
+        model = CellposeModel(model_type=model_type, gpu=True)
     except Exception as e:
-        return f"Error during segmentation: {str(e)}", None
+        return f"Error loading Cellpose model: {e}", None
+
+    # Use pre-computed detection results
+    total_sets = sum(cond["detection"].n_image_sets for cond in app_state.conditions.values()
+                     if "detection" in cond)
+    if total_sets == 0:
+        return "No image sets detected.", None
+
+    processed = 0
+    app_state.masks = {}
+    preview_overlay = None
+
+    for cond_name, cond_info in app_state.conditions.items():
+        det = cond_info.get("detection")
+        if not det:
+            continue
+
+        app_state.masks[cond_name] = {}
+
+        for base_name, channels in det.image_sets.items():
+            progress(processed / max(total_sets, 1), desc=f"Segmenting {cond_name}/{base_name}...")
+
+            seg_channels = []
+
+            # Load nuclear channel
+            if nuc_sfx and nuc_sfx in channels:
+                nuc_img = load_image(channels[nuc_sfx])
+                if nuc_img is not None:
+                    seg_channels.append(normalize_image(nuc_img))
+
+            # Load cyto channel
+            if cyto_sfx and cyto_sfx in channels:
+                cyto_img = load_image(channels[cyto_sfx])
+                if cyto_img is not None:
+                    seg_channels.append(normalize_image(cyto_img))
+
+            if not seg_channels:
+                processed += 1
+                continue
+
+            seg_input = np.stack(seg_channels, axis=0)
+
+            # Run Cellpose
+            try:
+                cp_args = {
+                    "diameter": diameter if diameter > 0 else None,
+                    "flow_threshold": flow_threshold,
+                    "min_size": min_size,
+                }
+                if seg_input.shape[0] == 1:
+                    cp_args["channels"] = [0, 0]
+
+                masks_list, flows, styles = model.eval(  # noqa: S307 - Cellpose API
+                    [seg_input], **cp_args
+                )
+                masks = masks_list[0]
+            except Exception as e:
+                print(f"Cellpose error on {cond_name}/{base_name}: {e}")
+                processed += 1
+                continue
+
+            app_state.masks[cond_name][base_name] = masks
+
+            if preview_overlay is None and masks.max() > 0:
+                try:
+                    from cellpose.utils import masks_to_outlines
+                    display_uint8 = (seg_channels[0] * 255).astype(np.uint8)
+                    rgb = np.stack([display_uint8, display_uint8, display_uint8], axis=-1)
+                    outlines = masks_to_outlines(masks)
+                    rgb[outlines, 0] = 255
+                    rgb[outlines, 1] = 0
+                    rgb[outlines, 2] = 0
+                    preview_overlay = rgb
+                except Exception:
+                    preview_overlay = (masks > 0).astype(np.uint8) * 255
+
+            processed += 1
+
+    total_cells = sum(
+        m.max() for cond_masks in app_state.masks.values()
+        for m in cond_masks.values()
+    )
+
+    return (
+        f"Segmentation complete! {total_sets} image sets, ~{total_cells} cells detected",
+        preview_overlay
+    )
 
 
 def load_existing_masks(masks_folder: str) -> Tuple[str, Optional[np.ndarray]]:
@@ -953,95 +1083,138 @@ def load_existing_masks(masks_folder: str) -> Tuple[str, Optional[np.ndarray]]:
         return "No mask files found", None
 
 
+def estimate_background_simple(image_data: np.ndarray, masks: np.ndarray, method: str = 'median') -> float:
+    """Estimate background intensity from non-cell pixels. Matches v1 logic."""
+    background_pixels = image_data[masks == 0]
+    if len(background_pixels) < (image_data.size * 0.01):
+        return float(np.percentile(image_data, 5))
+    if method == 'median':
+        return float(np.median(background_pixels))
+    elif method == 'percentile5':
+        return float(np.percentile(background_pixels, 5))
+    elif method == 'mean':
+        return float(np.mean(background_pixels))
+    return float(np.median(background_pixels))
+
+
 def run_quantification(
+    marker_suffixes_list: list,
     marker_names_str: str,
     bg_method: str,
     min_area: int,
     progress=gr.Progress()
 ) -> Tuple[str, pd.DataFrame, str]:
-    """Run CTCF quantification on all segmented images."""
+    """Run CTCF quantification using pre-computed detection results."""
     if not app_state.masks:
         return "No masks available. Run segmentation first.", pd.DataFrame(), ""
 
     if not app_state.conditions:
-        return "No conditions loaded. Please scan a folder first.", pd.DataFrame(), ""
+        return "No conditions loaded. Browse for a folder first.", pd.DataFrame(), ""
+
+    # marker_suffixes_list comes from CheckboxGroup (already a list)
+    marker_suffixes = marker_suffixes_list if isinstance(marker_suffixes_list, list) else []
+    if not marker_suffixes:
+        return "Select at least one marker channel for quantification.", pd.DataFrame(), ""
 
     marker_names = [n.strip() for n in marker_names_str.split(',') if n.strip()]
+    while len(marker_names) < len(marker_suffixes):
+        marker_names.append(f"Marker{len(marker_names) + 1}")
+    marker_names = marker_names[:len(marker_suffixes)]
+
+    bg_map = {"Median": "median", "Percentile (5%)": "percentile5", "Mean": "mean"}
+    bg_method_internal = bg_map.get(bg_method, "median")
 
     all_results = []
     total = sum(len(masks) for masks in app_state.masks.values())
     processed = 0
 
     for cond_name, cond_masks in app_state.masks.items():
-        condition = app_state.conditions.get(cond_name)
-        if not condition:
+        cond_info = app_state.conditions.get(cond_name)
+        if not cond_info:
             continue
 
-        config = condition.channel_config
-
-        # Update marker names if provided
-        if marker_names:
-            config.marker_names = marker_names[:len(config.marker_suffixes)]
+        det = cond_info.get("detection")
+        if not det:
+            continue
 
         for base_name, masks in cond_masks.items():
-            progress(processed / total, desc=f"Quantifying {cond_name}/{base_name}...")
+            progress(processed / max(total, 1), desc=f"Quantifying {cond_name}/{base_name}...")
 
             if masks.max() == 0:
                 processed += 1
                 continue
 
-            image_paths = condition.image_sets.get(base_name, {})
+            # Get the file paths for this image set from detection
+            channels = det.image_sets.get(base_name, {})
 
-            # Load marker images
-            marker_images = {}
-            for suffix, name in zip(config.marker_suffixes, config.marker_names):
-                marker_path = image_paths.get(suffix.upper())
-                if marker_path:
-                    try:
-                        marker_images[name] = load_image(marker_path)
-                    except Exception:
-                        pass
+            # Build per-cell data
+            unique_cell_ids = np.unique(masks)[1:]
+            cell_data_dict = {}
 
-            if not marker_images:
+            for cell_id in unique_cell_ids:
+                cell_coords = np.where(masks == cell_id)
+                area = len(cell_coords[0])
+                if area > 0 and area >= min_area:
+                    cell_data_dict[cell_id] = {
+                        "Condition": cond_name,
+                        "ImageSet": base_name,
+                        "CellID": int(cell_id),
+                        "Area": area,
+                    }
+
+            if not cell_data_dict:
                 processed += 1
                 continue
 
-            # Estimate backgrounds
-            backgrounds = {}
-            for name, img in marker_images.items():
-                try:
-                    backgrounds[name] = estimate_background(img, masks)
-                except Exception:
-                    backgrounds[name] = 0.0
+            # Process each marker
+            for marker_suffix, marker_name in zip(marker_suffixes, marker_names):
+                marker_path = channels.get(marker_suffix)
 
-            # Quantify
-            try:
-                results = quantify_multiple_markers(
-                    marker_images=marker_images,
-                    masks=masks,
-                    backgrounds=backgrounds,
-                    parallel=True
-                )
+                if not marker_path:
+                    for cid in cell_data_dict:
+                        cell_data_dict[cid][f"{marker_name}_CTCF"] = 0
+                        cell_data_dict[cid][f"{marker_name}_MeanIntensity"] = 0
+                    continue
 
-                df = results_to_dataframe(
-                    results=results,
-                    condition=cond_name,
-                    image_set=base_name
-                )
+                marker_img = load_image(marker_path)
+                if marker_img is None:
+                    for cid in cell_data_dict:
+                        cell_data_dict[cid][f"{marker_name}_CTCF"] = 0
+                        cell_data_dict[cid][f"{marker_name}_MeanIntensity"] = 0
+                    continue
 
-                # Filter by min area
-                if min_area > 0 and 'Area' in df.columns:
-                    df = df[df['Area'] >= min_area]
+                background_val = estimate_background_simple(marker_img, masks, bg_method_internal)
 
-                if len(df) > 0:
-                    all_results.append(df)
-            except Exception as e:
-                print(f"Error quantifying {cond_name}/{base_name}: {e}")
+                for cell_id, cell_data in cell_data_dict.items():
+                    cell_coords = np.where(masks == cell_id)
+                    y_coords = cell_coords[0]
+                    x_coords = cell_coords[1]
+
+                    valid = (y_coords < marker_img.shape[0]) & (x_coords < marker_img.shape[1])
+                    y_coords = y_coords[valid]
+                    x_coords = x_coords[valid]
+
+                    if len(y_coords) == 0:
+                        cell_data[f"{marker_name}_CTCF"] = 0
+                        cell_data[f"{marker_name}_MeanIntensity"] = 0
+                        continue
+
+                    roi_pixels = marker_img[y_coords, x_coords].astype(float)
+                    area = len(roi_pixels)
+                    integrated_density = float(np.sum(roi_pixels))
+                    ctcf = max(0.0, integrated_density - (area * background_val))
+                    mean_intensity = integrated_density / area if area > 0 else 0.0
+
+                    cell_data[f"{marker_name}_CTCF"] = ctcf
+                    cell_data[f"{marker_name}_MeanIntensity"] = mean_intensity
+
+            for cell_data in cell_data_dict.values():
+                all_results.append(cell_data)
 
             processed += 1
 
     if all_results:
-        combined_df = pd.concat(all_results, ignore_index=True)
+        combined_df = pd.DataFrame(all_results)
         app_state.results_df = combined_df
 
         n_cells = len(combined_df)
@@ -1052,7 +1225,7 @@ def run_quantification(
 
         return status, combined_df, summary
     else:
-        return "No results generated", pd.DataFrame(), ""
+        return "No results generated. Check marker channels are selected.", pd.DataFrame(), ""
 
 
 def export_results(export_format: str, output_folder: str) -> Tuple[str, Optional[str]]:
@@ -1239,15 +1412,13 @@ def create_load_images_tab():
                 info="Folder containing condition subfolders with TIFF images"
             )
 
-            with gr.Row():
-                browse_btn = gr.Button("Browse Folder", variant="primary")
-                scan_btn = gr.Button("Scan", variant="secondary")
+            browse_btn = gr.Button("Browse Folder", variant="primary")
 
             gr.HTML('<div class="section-header">Detected Conditions</div>')
 
             conditions_table = gr.Dataframe(
-                headers=["Condition", "Images", "Status"],
-                datatype=["str", "number", "str"],
+                headers=["Condition", "Image Sets", "Channels", "Suffixes", "Status"],
+                datatype=["str", "number", "number", "str", "str"],
                 value=[],
                 interactive=False
             )
@@ -1261,22 +1432,31 @@ def create_load_images_tab():
         with gr.Column(scale=1):
             gr.HTML('<div class="section-header">Channel Configuration</div>')
 
-            nuclear_ch = gr.Textbox(
-                label="Nuclear Channel Suffix",
-                value="C0",
-                info="Suffix for nuclear/DAPI channel (e.g., C0)"
+            nuclear_ch = gr.Dropdown(
+                label="Nuclear Channel",
+                choices=["None"],
+                value="None",
+                info="Channel for nuclear/DAPI segmentation (set to None if not available)"
             )
 
-            cyto_ch = gr.Textbox(
-                label="Cytoplasm Channel Suffix",
-                value="C1",
-                info="Suffix for cytoplasm channel (e.g., C1)"
+            cyto_ch = gr.Dropdown(
+                label="Cytoplasm Channel",
+                choices=["None"],
+                value="None",
+                info="Channel for cytoplasm segmentation (set to None if not available)"
             )
 
-            marker_suffixes = gr.Textbox(
-                label="Marker Channel Suffixes",
-                value="C2, C3",
-                info="Comma-separated suffixes for marker channels"
+            marker_suffixes = gr.CheckboxGroup(
+                label="Marker Channels (for quantification)",
+                choices=[],
+                value=[],
+                info="Select channels to quantify CTCF"
+            )
+
+            marker_names_input = gr.Textbox(
+                label="Marker Names",
+                value="",
+                info="Comma-separated names matching selected markers above"
             )
 
             gr.HTML('<div class="section-header">Preview</div>')
@@ -1287,38 +1467,63 @@ def create_load_images_tab():
                 interactive=False
             )
 
+    # Advanced Settings accordion (below the two columns)
+    with gr.Accordion("Advanced: Detected Channels", open=False):
+        advanced_summary = gr.HTML("")
+        image_sets_table = gr.Dataframe(
+            label="Image Sets",
+            value=[],
+            interactive=False,
+            wrap=True,
+        )
+        orphan_files_text = gr.Textbox(
+            label="Orphan Files (unmatched)",
+            value="",
+            interactive=False,
+            lines=2,
+            visible=True,
+        )
+
     # --- Event handlers ---
 
-    # Browse button opens native OS folder dialog
+    # Browse button: opens native dialog, auto-detects conditions, populates channel config
     browse_btn.click(
-        fn=open_folder_dialog,
+        fn=browse_and_detect,
         inputs=[folder_path],
-        outputs=[folder_path]
+        outputs=[
+            folder_path, conditions_table, scan_status,
+            nuclear_ch, cyto_ch, marker_suffixes, marker_names_input,
+            advanced_summary, image_sets_table, orphan_files_text,
+        ]
     )
 
-    # Scan button
-    scan_btn.click(
-        fn=scan_folder,
-        inputs=[folder_path, nuclear_ch, cyto_ch, marker_suffixes],
-        outputs=[conditions_table, scan_status]
-    )
-
-    scan_btn.click(
+    # Also load a preview image after browsing
+    browse_btn.click(
         fn=load_preview_image,
         inputs=[folder_path, nuclear_ch],
         outputs=[preview_image]
     )
 
+    # If user types/pastes a path and presses Enter, also auto-detect
+    folder_path.submit(
+        fn=detect_conditions,
+        inputs=[folder_path],
+        outputs=[conditions_table, scan_status]
+    )
+
     return {
         'folder_path': folder_path,
         'browse_btn': browse_btn,
-        'scan_btn': scan_btn,
         'conditions_table': conditions_table,
         'scan_status': scan_status,
         'nuclear_ch': nuclear_ch,
         'cyto_ch': cyto_ch,
         'marker_suffixes': marker_suffixes,
-        'preview_image': preview_image
+        'marker_names_input': marker_names_input,
+        'preview_image': preview_image,
+        'advanced_summary': advanced_summary,
+        'image_sets_table': image_sets_table,
+        'orphan_files_text': orphan_files_text,
     }
 
 
@@ -1398,18 +1603,7 @@ def create_segmentation_tab():
                 show_masks = gr.Checkbox(label="Show Masks", value=True)
                 show_outlines = gr.Checkbox(label="Show Outlines", value=False)
 
-    # Event handlers
-    run_seg_btn.click(
-        fn=run_segmentation,
-        inputs=[model_select, cell_diameter, flow_threshold, min_size],
-        outputs=[seg_status, seg_preview]
-    )
-
-    load_masks_btn.click(
-        fn=load_existing_masks,
-        inputs=[masks_folder],
-        outputs=[seg_status, seg_preview]
-    )
+    # NOTE: Event handlers wired in create_app() where cross-tab inputs are available
 
     return {
         'model_select': model_select,
@@ -1570,12 +1764,7 @@ def create_quantification_tab():
     # Hidden dataframe to store results
     results_df_state = gr.State(value=None)
 
-    # Event handlers
-    run_quant_btn.click(
-        fn=run_quantification,
-        inputs=[marker_names, bg_method, min_area],
-        outputs=[quant_status, results_df_state, quant_summary]
-    )
+    # NOTE: Event handlers wired in create_app() where cross-tab inputs are available
 
     return {
         'marker_names': marker_names,
@@ -1758,10 +1947,50 @@ def create_app():
             </div>
         """)
 
+        # ═══════════════════════════════════════════════════════════
+        # CROSS-TAB EVENT WIRING
+        # ═══════════════════════════════════════════════════════════
+
         # Theme toggle handler (JS only)
         theme_btn.click(
             fn=lambda: None,
             js="() => { toggleTheme(); }"
+        )
+
+        # Segmentation: needs nuclear_ch and cyto_ch from Load tab
+        seg_components['run_seg_btn'].click(
+            fn=run_segmentation,
+            inputs=[
+                load_components['nuclear_ch'],
+                load_components['cyto_ch'],
+                seg_components['model_select'],
+                seg_components['cell_diameter'],
+                seg_components['flow_threshold'],
+                seg_components['min_size'],
+            ],
+            outputs=[seg_components['seg_status'], seg_components['seg_preview']]
+        )
+
+        seg_components['load_masks_btn'].click(
+            fn=load_existing_masks,
+            inputs=[seg_components['masks_folder']],
+            outputs=[seg_components['seg_status'], seg_components['seg_preview']]
+        )
+
+        # Quantification: marker suffixes (CheckboxGroup) and names from Load tab
+        quant_components['run_quant_btn'].click(
+            fn=run_quantification,
+            inputs=[
+                load_components['marker_suffixes'],
+                load_components['marker_names_input'],
+                quant_components['bg_method'],
+                quant_components['min_area'],
+            ],
+            outputs=[
+                quant_components['quant_status'],
+                quant_components['results_df_state'],
+                quant_components['quant_summary'],
+            ]
         )
 
     return app

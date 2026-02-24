@@ -363,7 +363,7 @@ class BatchPipeline:
 
         # Estimate backgrounds
         backgrounds = {
-            name: estimate_background(img, masks)
+            name: estimate_background(img, masks).global_value
             for name, img in marker_images.items()
         }
 
@@ -537,7 +537,7 @@ class BatchPipeline:
 
                 # Estimate backgrounds
                 backgrounds = {
-                    name: estimate_background(img, masks)
+                    name: estimate_background(img, masks).global_value
                     for name, img in marker_images.items()
                 }
 

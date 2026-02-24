@@ -29,6 +29,10 @@ class Session:
     tracked_masks: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
     track_graphs: Dict[str, dict] = field(default_factory=dict)
 
+    # Preprocessing calibration frames (numpy arrays, not serialized)
+    dark_master: Optional[np.ndarray] = None
+    flat_norm: Optional[np.ndarray] = None
+
     # Results
     results_df: Optional[pd.DataFrame] = None
 

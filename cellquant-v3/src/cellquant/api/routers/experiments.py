@@ -1,5 +1,7 @@
 """Experiment scanning and condition management."""
 
+import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
@@ -11,9 +13,86 @@ from cellquant.api.schemas.experiments import (
     ImageSetInfo,
     DetectionResult,
     ChannelConfigSchema,
+    SetOutputRequest,
+    PreprocessingRequest,
 )
 
+
+def _wavelength_to_color(nm: float) -> str:
+    """Map emission wavelength (nm) to a conventional fluorescence false-color."""
+    if nm <= 0:
+        return "#FFFFFF"       # transmitted light / brightfield → white
+    if nm < 450:
+        return "#7B2FBE"       # violet (BFP, ~400-450nm)
+    if nm < 500:
+        return "#4488FF"       # blue (DAPI ~461nm, Hoechst ~470nm, CFP)
+    if nm < 560:
+        return "#00CC44"       # green (GFP ~509nm, FITC ~525nm, Alexa488)
+    if nm < 600:
+        return "#FFD700"       # yellow (YFP ~527em, but often exc ~560)
+    if nm < 640:
+        return "#FF6600"       # orange (TRITC ~573nm, Cy3 ~570nm, Alexa555)
+    return "#FF4444"           # red (Cy5 ~670nm, mCherry ~610nm, Alexa647)
+
+
+def _extract_wavelengths(image_sets: dict, first_n: int = 1) -> dict[str, float]:
+    """Extract emission wavelengths from TIFF metadata for each channel suffix.
+
+    Reads MetaMorph/ImageJ XML metadata from the first TIFF of each channel.
+    Returns {suffix: wavelength_nm}.
+    """
+    wavelengths: dict[str, float] = {}
+    for base_name, channels in image_sets.items():
+        for suffix, filepath in channels.items():
+            if suffix in wavelengths:
+                continue
+            try:
+                import tifffile
+                with tifffile.TiffFile(str(filepath)) as tif:
+                    desc = tif.pages[0].tags.get("ImageDescription")
+                    if not desc:
+                        continue
+                    root = ET.fromstring(desc.value)
+                    for prop in root.iter("prop"):
+                        if prop.get("id") == "wavelength":
+                            wl = float(prop.get("value", "0"))
+                            if wl >= 0:
+                                wavelengths[suffix] = wl
+                            break
+            except Exception:
+                pass
+        if len(wavelengths) >= len(channels):
+            break  # got all suffixes
+    return wavelengths
+
 router = APIRouter(prefix="/experiments", tags=["experiments"])
+
+
+@router.post("/browse")
+async def browse_folder() -> dict:
+    """Open a native OS folder picker dialog and return the selected path."""
+    result: dict = {"path": None}
+
+    def _open_dialog():
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title="Select Experiment Folder")
+        root.destroy()
+        if path:
+            result["path"] = path
+
+    # tkinter must run on a dedicated thread (not asyncio event loop)
+    t = threading.Thread(target=_open_dialog)
+    t.start()
+    t.join()
+
+    if not result["path"]:
+        return {"path": None}
+    return {"path": result["path"]}
 
 
 @router.post("/scan", response_model=ScanResponse)
@@ -23,8 +102,14 @@ async def scan_experiment(req: ScanRequest):
     if not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {req.path}")
 
+    # Determine output directory
+    if req.output_path:
+        output_dir = Path(req.output_path)
+    else:
+        output_dir = folder.parent / "CellQuant_Output"
+
     manager = get_session_manager()
-    session = manager.create_session()
+    session = manager.create_session(output_dir=output_dir)
 
     from cellquant.core.io.channel_detect import detect_image_sets
 
@@ -82,26 +167,38 @@ async def scan_experiment(req: ScanRequest):
     session.experiment_path = folder
     session.save_state()
 
+    # Pre-render all images in background for instant browsing
+    from cellquant.tiles.thumbnail import prerender_all
+    prerender_all(session)
+
     # Build detection summary from first condition with data
     det_response = None
     if conditions:
         first_cond = list(session.conditions.values())[0]
+        image_sets_raw = first_cond.get("image_sets", {})
+
+        # Extract wavelengths from TIFF metadata
+        wavelengths = _extract_wavelengths(image_sets_raw)
+        channel_colors = {s: _wavelength_to_color(w) for s, w in wavelengths.items()}
+
         det_response = DetectionResult(
             channel_suffixes=first_cond.get("channel_suffixes", []),
             n_channels=len(first_cond.get("channel_suffixes", [])),
             n_image_sets=sum(c.n_image_sets for c in conditions),
             n_complete=sum(c.n_image_sets for c in conditions),
             n_incomplete=0,
-            confidence=0.95,
             suggested_nuclear=first_cond.get("nuclear_suffix"),
             suggested_cyto=first_cond.get("cyto_suffix"),
             suggested_markers=first_cond.get("suggested_markers", []),
+            channel_wavelengths=wavelengths,
+            channel_colors=channel_colors,
         )
 
     return ScanResponse(
         session_id=session.id,
         conditions=conditions,
         detection=det_response,
+        output_path=str(session.directory),
     )
 
 
@@ -125,6 +222,99 @@ async def get_experiment(session_id: str):
         )
 
     return ScanResponse(session_id=session.id, conditions=conditions)
+
+
+@router.post("/{session_id}/set-output")
+async def set_output_path(session_id: str, req: SetOutputRequest):
+    """Change the session output directory, moving existing data."""
+    import shutil
+
+    session = get_session(session_id)
+    old_dir = session.directory
+    new_dir = Path(req.output_path)
+
+    if old_dir == new_dir:
+        return {"status": "ok", "output_path": str(new_dir)}
+
+    new_dir.mkdir(parents=True, exist_ok=True)
+
+    # Move existing contents
+    if old_dir.exists():
+        for item in old_dir.iterdir():
+            dest = new_dir / item.name
+            if dest.exists():
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            shutil.move(str(item), str(dest))
+        # Clean up old directory if empty
+        try:
+            old_dir.rmdir()
+        except OSError:
+            pass
+
+    session.directory = new_dir
+    session.save_state()
+    return {"status": "ok", "output_path": str(new_dir)}
+
+
+@router.post("/{session_id}/open-folder")
+async def open_folder(session_id: str, body: dict):
+    """Open a result folder in the OS file explorer."""
+    import subprocess, sys
+
+    session = get_session(session_id)
+    condition = body.get("condition", "")
+    base_name = body.get("base_name", "")
+
+    folder = session.directory / condition / base_name
+    if not folder.is_dir():
+        # Fall back to condition folder, then session root
+        folder = session.directory / condition if (session.directory / condition).is_dir() else session.directory
+
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", str(folder)])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(folder)])
+    else:
+        subprocess.Popen(["xdg-open", str(folder)])
+
+    return {"status": "ok", "path": str(folder)}
+
+
+@router.post("/{session_id}/preprocessing")
+async def configure_preprocessing(session_id: str, req: PreprocessingRequest):
+    """Load dark-frame and flat-field calibration images."""
+    from cellquant.core.preprocessing.calibration import (
+        load_dark_frames,
+        load_flat_field,
+        validate_calibration_frame,
+    )
+
+    session = get_session(session_id)
+    warnings = []
+
+    if req.dark_frame_paths:
+        try:
+            dark = load_dark_frames([Path(p) for p in req.dark_frame_paths])
+            session.dark_master = dark
+        except Exception as e:
+            warnings.append(f"Dark frame loading failed: {e}")
+
+    if req.flat_field_paths:
+        try:
+            flat = load_flat_field([Path(p) for p in req.flat_field_paths])
+            session.flat_norm = flat
+        except Exception as e:
+            warnings.append(f"Flat field loading failed: {e}")
+
+    return {
+        "status": "ok",
+        "has_dark": session.dark_master is not None,
+        "has_flat": session.flat_norm is not None,
+        "warnings": warnings,
+    }
 
 
 @router.post("/{session_id}/configure")

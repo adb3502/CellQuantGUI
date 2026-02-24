@@ -149,14 +149,19 @@ class CellposeEngine:
         # Ensure image is in correct format
         image = self._prepare_image(image)
 
-        # Run Cellpose inference (model.eval is the standard Cellpose API)
-        masks, flows, styles, diameter_used = self.model.eval(
+        # Cellpose model inference — v4.0.1+ returns 3 values (no diameter)
+        out = self.model.eval(
             image,
-            diameter=diameter if diameter > 0 else None,
+            diameter=diameter if diameter and diameter > 0 else None,
             flow_threshold=flow_threshold,
             min_size=min_size,
             channels=channels
         )
+        if len(out) == 4:
+            masks, flows, styles, diameter_used = out
+        else:
+            masks, flows, styles = out
+            diameter_used = diameter or 0.0
 
         return SegmentationResult(
             masks=masks,
@@ -208,7 +213,7 @@ class CellposeEngine:
             # Batch inference using Cellpose API
             masks_list, flows_list, styles_list = self.model.eval(
                 batch,
-                diameter=diameter if diameter > 0 else None,
+                diameter=diameter if diameter and diameter > 0 else None,
                 flow_threshold=flow_threshold,
                 min_size=min_size,
                 channels=channels,
@@ -321,28 +326,81 @@ def _create_simple_overlay(
     masks: np.ndarray,
     alpha: float = 0.5
 ) -> np.ndarray:
-    """Fallback overlay creation without Cellpose plotting."""
+    """Vectorized mask overlay — single-pass LUT instead of per-cell loop."""
     if image.ndim == 3:
         display_img = np.mean(image, axis=0 if image.shape[0] <= 3 else -1)
     else:
-        display_img = image
+        display_img = image.astype(np.float64)
 
-    # Normalize
-    display_norm = (display_img - np.min(display_img)) / (np.max(display_img) - np.min(display_img) + 1e-8)
+    # Normalize to 0-1
+    vmin, vmax = display_img.min(), display_img.max()
+    if vmax > vmin:
+        display_norm = (display_img - vmin) / (vmax - vmin)
+    else:
+        display_norm = np.zeros_like(display_img, dtype=np.float64)
 
-    # Create RGB
-    overlay = np.stack([display_norm, display_norm, display_norm], axis=-1)
+    # Build color LUT: index 0 = no mask (black placeholder, won't be used)
+    max_label = int(masks.max())
+    rng = np.random.RandomState(42)
+    lut = rng.rand(max_label + 1, 3).astype(np.float32)
+    lut[0] = 0  # background — unused
 
-    # Add random colors for masks
-    unique_masks = np.unique(masks)[1:]
-    np.random.seed(42)
+    # Vectorized: map every pixel to its mask color in one shot
+    mask_colors = lut[masks]  # (H, W, 3)
 
-    for mask_id in unique_masks:
-        color = np.random.rand(3)
-        mask_pixels = masks == mask_id
-        overlay[mask_pixels] = color * alpha + overlay[mask_pixels] * (1 - alpha)
+    # Grayscale RGB base
+    gray = display_norm.astype(np.float32)
+    overlay = np.stack([gray, gray, gray], axis=-1)
 
-    return (overlay * 255).astype(np.uint8)
+    # Blend only where mask > 0
+    has_mask = masks > 0
+    overlay[has_mask] = mask_colors[has_mask] * alpha + overlay[has_mask] * (1 - alpha)
+
+    return (np.clip(overlay, 0, 1) * 255).astype(np.uint8)
+
+
+def _create_outline_overlay(
+    image: np.ndarray,
+    masks: np.ndarray,
+) -> np.ndarray:
+    """Red outline overlay — cell boundaries drawn on the image."""
+    from scipy.ndimage import binary_dilation
+
+    if image.ndim == 3:
+        display_img = np.mean(image, axis=0 if image.shape[0] <= 3 else -1)
+    else:
+        display_img = image.astype(np.float64)
+
+    # Normalize to uint8
+    vmin, vmax = display_img.min(), display_img.max()
+    if vmax > vmin:
+        gray = ((display_img - vmin) / (vmax - vmin) * 255).astype(np.uint8)
+    else:
+        gray = np.zeros(display_img.shape, dtype=np.uint8)
+
+    # Build RGB from grayscale
+    overlay = np.stack([gray, gray, gray], axis=-1)
+
+    # Extract outlines: pixels at mask boundaries
+    # A pixel is an outline if it's in a mask but has a neighbor with a different label
+    if masks.max() == 0:
+        return overlay
+
+    # Shift masks in 4 directions and compare — boundary pixels differ from neighbors
+    padded = np.pad(masks, 1, mode='constant', constant_values=0)
+    outlines = (
+        (masks != padded[:-2, 1:-1]) |  # up
+        (masks != padded[2:, 1:-1]) |    # down
+        (masks != padded[1:-1, :-2]) |   # left
+        (masks != padded[1:-1, 2:])      # right
+    ) & (masks > 0)
+
+    # Draw red outlines
+    overlay[outlines, 0] = 255
+    overlay[outlines, 1] = 0
+    overlay[outlines, 2] = 0
+
+    return overlay
 
 
 def segment_image_stack(

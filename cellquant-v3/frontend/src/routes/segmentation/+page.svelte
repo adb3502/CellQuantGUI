@@ -1,23 +1,109 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
-	import { Microscope, Play, Square, RotateCcw } from 'lucide-svelte';
-	import { runSegmentation, cancelSegmentation, getSegmentationStatus } from '$api/client';
+	import { onMount, onDestroy } from 'svelte';
+	import { get } from 'svelte/store';
+	import { Microscope, Play, Square, RotateCcw, ChevronLeft, ChevronRight, FolderOpen, Calculator, Info } from 'lucide-svelte';
+	import { runSegmentation, cancelSegmentation, maskRenderUrl, openResultFolder, runQuantification, getMaskStatus } from '$api/client';
 	import { ProgressSocket } from '$api/websocket';
-	import type { ProgressMessage } from '$api/types';
+	import type { ProgressMessage, QCFilterParams, MaskStatusResponse } from '$api/types';
+	import ConfirmDialog from '$components/ui/ConfirmDialog.svelte';
 	import { sessionId } from '$stores/session';
-	import { segParams, segStatus, segTaskId } from '$stores/segmentation';
+	import { detection, channelRoles } from '$stores/experiment';
+	import {
+		segParams, segTaskId, resetSegState,
+		segRunning, segProgress, segMessage, segWsStatus,
+		segElapsed, segResult, segLogs, segCompletedImages,
+		type CompletedImage
+	} from '$stores/segmentation';
+	import { quantTaskId, qcFilterResults, type QCFilterResult } from '$stores/quantification';
 	import TaskStatus from '$components/progress/TaskStatus.svelte';
 
-	let running = $state(false);
-	let wsProgress = $state(0);
-	let wsMessage = $state('');
-	let wsStatus = $state('pending');
-	let wsElapsed = $state(0);
-	let wsResult = $state<Record<string, unknown> | null>(null);
+	let logPre: HTMLPreElement | undefined = $state();
 	let socket: ProgressSocket | null = null;
 
+	// Combined analysis: run quantification after segmentation
+	let alsoQuantify = $state(true);
+	let quantRunning = $state(false);
+	let quantProgress = $state(0);
+	let quantMessage = $state('');
+	let quantStatus = $state('pending');
+	let quantElapsed = $state(0);
+	let quantResult = $state<Record<string, unknown> | null>(null);
+	let quantSocket: ProgressSocket | null = null;
+
+	// Use the user's channel config (quantify checkbox) — fall back to auto-detection
+	let markerSuffixes = $derived(
+		$channelRoles.filter(r => r.quantify && !r.excluded).length > 0
+			? $channelRoles.filter(r => r.quantify && !r.excluded).map(r => r.suffix)
+			: ($detection?.suggested_markers ?? [])
+	);
+	let markerNames = $derived(
+		$channelRoles.filter(r => r.quantify && !r.excluded).length > 0
+			? $channelRoles.filter(r => r.quantify && !r.excluded).map(r => r.name)
+			: markerSuffixes.map((s: string) => s)
+	);
+
+	// Mask status (existing masks on disk)
+	let maskStatus = $state<MaskStatusResponse | null>(null);
+	let dialogOpen = $state(false);
+	let dialogTitle = $state('');
+	let dialogMessage = $state('');
+	let dialogActions = $state<Array<{label: string; variant: 'primary' | 'secondary' | 'danger'; onclick: () => void}>>([]);
+
+	async function checkMaskStatus() {
+		if (!$sessionId) return;
+		try {
+			maskStatus = await getMaskStatus($sessionId);
+		} catch {
+			maskStatus = null;
+		}
+	}
+
+	// WS message tracking (local — only needed while connected)
+	let prevCurrent = -1;
+	let prevCondition = '';
+	let prevImageSet = '';
+
+	// ── Preview carousel state (local UI, derived from store) ──
+	let previewIndex = $state(0);
+	let activeCondition = $state('');
+	let overlayStyle: 'filled' | 'outline' = $state('outline');
+	let overlayBg: 'composite' | 'cyto' = $state('cyto');
+
+	let previewConditions = $derived(
+		[...new Set($segCompletedImages.map(img => img.condition))]
+	);
+
+	let filteredImages = $derived(
+		activeCondition
+			? $segCompletedImages.filter(img => img.condition === activeCondition)
+			: $segCompletedImages
+	);
+
+	let currentPreview = $derived(filteredImages[previewIndex] ?? null);
+
+	let previewSrc = $derived(
+		currentPreview && $sessionId
+			? maskRenderUrl($sessionId, currentPreview.condition, currentPreview.baseName, 800, overlayStyle, overlayBg)
+			: null
+	);
+
+	// Clamp index when filter changes
+	$effect(() => {
+		if (previewIndex >= filteredImages.length && filteredImages.length > 0) {
+			previewIndex = filteredImages.length - 1;
+		}
+	});
+
+	// Auto-select first condition tab
+	$effect(() => {
+		if (!activeCondition && previewConditions.length > 0) {
+			activeCondition = previewConditions[0];
+		}
+	});
+
 	const modelOptions = [
-		{ value: 'cyto3', label: 'Cyto3 (general)' },
+		{ value: 'cpsam', label: 'Cellpose-SAM' },
+		{ value: 'cyto3', label: 'Cyto3' },
 		{ value: 'cyto2', label: 'Cyto2' },
 		{ value: 'nuclei', label: 'Nuclei' },
 		{ value: 'tissuenet_cp3', label: 'TissueNet' }
@@ -38,72 +124,276 @@
 	function handleWSMessage(msg: ProgressMessage) {
 		if (msg.task_id && msg.task_id !== $segTaskId) return;
 
+		if (msg.logs && msg.logs.length > 0) {
+			$segLogs = msg.logs;
+			if (logPre) {
+				requestAnimationFrame(() => {
+					if (logPre) logPre.scrollTop = logPre.scrollHeight;
+				});
+			}
+		}
+
 		if (msg.type === 'progress') {
-			wsProgress = msg.progress ?? 0;
-			wsMessage = msg.message ?? '';
-			wsStatus = 'running';
-			wsElapsed = msg.elapsed_seconds ?? 0;
+			$segProgress = msg.progress ?? 0;
+			$segMessage = msg.message ?? '';
+			$segWsStatus = 'running';
+			$segElapsed = msg.elapsed_seconds ?? 0;
+
+			// Detect completed image: when current increments, previous image finished
+			const cur = msg.current ?? 0;
+			if (cur > prevCurrent && prevCurrent >= 0 && prevCondition && prevImageSet) {
+				const images = get(segCompletedImages);
+				const already = images.some(
+					img => img.condition === prevCondition && img.baseName === prevImageSet
+				);
+				if (!already) {
+					$segCompletedImages = [...images, { condition: prevCondition, baseName: prevImageSet }];
+					previewIndex = filteredImages.length;
+				}
+			}
+			prevCurrent = cur;
+			prevCondition = msg.condition ?? '';
+			prevImageSet = msg.image_set ?? '';
 		} else if (msg.type === 'task_complete') {
-			wsProgress = 100;
-			wsStatus = msg.status ?? 'complete';
-			wsMessage = msg.message ?? '';
-			wsElapsed = msg.elapsed_seconds ?? 0;
-			wsResult = (msg.data as Record<string, unknown>) ?? null;
-			running = false;
+			// Last image also completed
+			if (prevCondition && prevImageSet) {
+				const images = get(segCompletedImages);
+				const already = images.some(
+					img => img.condition === prevCondition && img.baseName === prevImageSet
+				);
+				if (!already) {
+					$segCompletedImages = [...images, { condition: prevCondition, baseName: prevImageSet }];
+				}
+			}
+			$segProgress = 100;
+			$segWsStatus = msg.status ?? 'complete';
+			$segMessage = msg.message ?? '';
+			$segElapsed = msg.elapsed_seconds ?? 0;
+			$segResult = (msg.data as Record<string, unknown>) ?? null;
+			$segRunning = false;
 			disconnectWebSocket();
+			checkMaskStatus();
+
+			// Auto-chain quantification
+			if (alsoQuantify && (msg.status === 'complete') && $sessionId) {
+				startQuantification();
+			}
 		}
 	}
 
 	async function handleRun() {
 		if (!$sessionId) return;
-		running = true;
-		wsProgress = 0;
-		wsMessage = 'Submitting...';
-		wsStatus = 'pending';
-		wsResult = null;
+
+		// Check for existing masks before starting
+		await checkMaskStatus();
+
+		if (maskStatus && maskStatus.total_masks > 0) {
+			if (maskStatus.is_complete) {
+				// All images already segmented
+				dialogTitle = 'Segmentation Complete';
+				dialogMessage = `All ${maskStatus.total_masks} images already have masks. Re-run segmentation from scratch?`;
+				dialogActions = [
+					{ label: 'Re-run', variant: 'primary', onclick: () => { dialogOpen = false; doRun(false); } },
+					{ label: 'Cancel', variant: 'danger', onclick: () => { dialogOpen = false; } },
+				];
+			} else {
+				// Partial masks exist
+				dialogTitle = 'Existing Masks Found';
+				dialogMessage = `Found masks for ${maskStatus.total_masks} of ${maskStatus.expected_total} images. Continue from where you left off or start fresh?`;
+				dialogActions = [
+					{ label: 'Continue', variant: 'primary', onclick: () => { dialogOpen = false; doRun(true); } },
+					{ label: 'Start Fresh', variant: 'secondary', onclick: () => { dialogOpen = false; doRun(false); } },
+					{ label: 'Cancel', variant: 'danger', onclick: () => { dialogOpen = false; } },
+				];
+			}
+			dialogOpen = true;
+			return;
+		}
+
+		// No existing masks — run directly
+		doRun(false);
+	}
+
+	async function doRun(skipExisting: boolean) {
+		if (!$sessionId) return;
+		$segRunning = true;
+		$segProgress = 0;
+		$segMessage = 'Submitting...';
+		$segWsStatus = 'pending';
+		$segResult = null;
+		$segLogs = [];
+		if (!skipExisting) {
+			$segCompletedImages = [];
+		}
+		prevCurrent = -1;
+		prevCondition = '';
+		prevImageSet = '';
+		activeCondition = '';
+		previewIndex = 0;
 
 		connectWebSocket();
 
 		try {
-			const { task_id } = await runSegmentation($sessionId, $segParams);
+			const { task_id } = await runSegmentation($sessionId, {
+				...$segParams,
+				skip_existing: skipExisting,
+			});
 			$segTaskId = task_id;
-			wsStatus = 'running';
+			$segWsStatus = 'running';
 		} catch (e) {
-			running = false;
-			wsStatus = 'error';
-			wsMessage = e instanceof Error ? e.message : 'Failed to start segmentation';
+			$segRunning = false;
+			$segWsStatus = 'error';
+			$segMessage = e instanceof Error ? e.message : 'Failed to start segmentation';
 			disconnectWebSocket();
+		}
+	}
+
+	async function startQuantification() {
+		if (!$sessionId) return;
+		quantRunning = true;
+		quantProgress = 0;
+		quantMessage = 'Starting quantification...';
+		quantStatus = 'running';
+		quantResult = null;
+		$qcFilterResults = [];
+
+		// Connect a separate WS for quantification progress
+		quantSocket = new ProgressSocket($sessionId);
+		quantSocket.onMessage(handleQuantWSMessage);
+		quantSocket.connect();
+
+		try {
+			const defaultQC: QCFilterParams = {
+				enabled: true,
+				remove_border_objects: true,
+				min_area: null,
+				max_area: null,
+				area_iqr_factor: 1.5,
+				min_solidity: 0.80,
+				max_eccentricity: 0.90,
+				min_circularity: 0.40,
+				max_aspect_ratio: 3.0,
+			};
+
+			const { task_id } = await runQuantification($sessionId, {
+				background_method: 'auto',
+				marker_suffixes: markerSuffixes,
+				marker_names: markerNames,
+				mitochondrial_markers: $channelRoles.filter(r => r.isMitochondrial && !r.excluded).map(r => r.name),
+				qc_filters: defaultQC,
+				outlier_threshold: 3.5,
+			});
+			$quantTaskId = task_id;
+		} catch (e) {
+			quantRunning = false;
+			quantStatus = 'error';
+			quantMessage = e instanceof Error ? e.message : 'Quantification failed';
+			quantSocket?.disconnect();
+			quantSocket = null;
+		}
+	}
+
+	function handleQuantWSMessage(msg: ProgressMessage) {
+		if (msg.task_id && msg.task_id !== $quantTaskId) return;
+
+		// Append quantification logs to the shared terminal output
+		if (msg.logs && msg.logs.length > 0) {
+			$segLogs = msg.logs;
+			if (logPre) {
+				requestAnimationFrame(() => {
+					if (logPre) logPre.scrollTop = logPre.scrollHeight;
+				});
+			}
+		}
+
+		if (msg.type === 'progress') {
+			quantProgress = msg.progress ?? 0;
+			quantMessage = msg.message ?? '';
+			quantStatus = 'running';
+			quantElapsed = msg.elapsed_seconds ?? 0;
+			// Capture QC filter results
+			const qc = (msg.data as Record<string, unknown>)?.qc as QCFilterResult | undefined;
+			if (qc) {
+				$qcFilterResults = [...$qcFilterResults, qc];
+			}
+		} else if (msg.type === 'task_complete') {
+			quantProgress = 100;
+			quantStatus = msg.status ?? 'complete';
+			quantMessage = msg.message ?? '';
+			quantElapsed = msg.elapsed_seconds ?? 0;
+			quantResult = (msg.data as Record<string, unknown>) ?? null;
+			quantRunning = false;
+			quantSocket?.disconnect();
+			quantSocket = null;
 		}
 	}
 
 	async function handleCancel() {
 		if ($segTaskId) {
 			await cancelSegmentation($segTaskId);
-			running = false;
-			wsStatus = 'cancelled';
-			wsMessage = 'Cancelled by user';
+			$segRunning = false;
+			$segWsStatus = 'cancelled';
+			$segMessage = 'Cancelled by user';
 			disconnectWebSocket();
 		}
 	}
 
 	function handleReset() {
-		$segTaskId = null;
-		wsProgress = 0;
-		wsMessage = '';
-		wsStatus = 'pending';
-		wsResult = null;
+		resetSegState();
+		activeCondition = '';
+		previewIndex = 0;
+		quantRunning = false;
+		quantProgress = 0;
+		quantMessage = '';
+		quantStatus = 'pending';
+		quantResult = null;
+		checkMaskStatus();
 	}
+
+	function prevPreview() {
+		if (previewIndex > 0) previewIndex--;
+	}
+
+	function nextPreview() {
+		if (previewIndex < filteredImages.length - 1) previewIndex++;
+	}
+
+	// Reconnect WebSocket if task is still running when we mount
+	onMount(() => {
+		if ($segRunning && $segTaskId && $sessionId) {
+			connectWebSocket();
+		}
+	});
+
+	// Check mask status when session changes (runs on mount + session change)
+	let prevSessionId = '';
+	$effect(() => {
+		const sid = $sessionId;
+		if (sid && sid !== prevSessionId) {
+			prevSessionId = sid;
+			checkMaskStatus();
+		}
+	});
 
 	onDestroy(() => {
 		disconnectWebSocket();
+		quantSocket?.disconnect();
+		quantSocket = null;
 	});
 </script>
+
+<ConfirmDialog
+	open={dialogOpen}
+	title={dialogTitle}
+	message={dialogMessage}
+	actions={dialogActions}
+/>
 
 <div class="page-segmentation">
 	<div class="two-col">
 		<!-- Parameters Panel -->
 		<section class="panel">
-			<h2 class="section-header">Cellpose Parameters</h2>
+			<h2 class="section-header">Analysis Parameters</h2>
 
 			<div class="form-grid">
 				<div class="form-field">
@@ -186,24 +476,79 @@
 						Use GPU
 					</label>
 				</div>
+
+				<div class="divider"></div>
+
+				<div class="form-field">
+					<label class="field-label quantify-toggle font-ui">
+						<input type="checkbox" bind:checked={alsoQuantify} />
+						<Calculator size={14} />
+						Run Quantification After
+					</label>
+					{#if alsoQuantify}
+						<span class="field-hint font-ui">
+							Auto background, QC filters on, MAD outlier detection (3.5)
+						</span>
+						{#if markerSuffixes.length > 0}
+							<div class="marker-list font-mono">
+								{#each markerSuffixes as suffix}
+									<span class="marker-tag">{suffix}</span>
+								{/each}
+							</div>
+						{/if}
+					{/if}
+				</div>
 			</div>
+
+			{#if maskStatus && !$segRunning && !quantRunning}
+				{#if maskStatus.total_masks > 0}
+					<div class="mask-banner">
+						<Info size={14} />
+						<span class="font-ui">
+							{maskStatus.total_masks} mask{maskStatus.total_masks !== 1 ? 's' : ''} found
+							{#if !maskStatus.is_complete}
+								({maskStatus.expected_total - maskStatus.total_masks} remaining)
+							{/if}
+						</span>
+					</div>
+				{/if}
+				{#if maskStatus.has_results}
+					<div class="mask-banner results-banner">
+						<Info size={14} />
+						<span class="font-ui">
+							Results found ({maskStatus.results_n_cells} cells)
+							— <a href="/results">view results</a>
+						</span>
+					</div>
+				{/if}
+			{/if}
 
 			<div class="action-row">
 				<button
 					class="btn btn-primary font-ui"
 					onclick={handleRun}
-					disabled={running || !$sessionId}
+					disabled={$segRunning || quantRunning || !$sessionId}
 				>
 					<Play size={16} />
-					Run Segmentation
+					{alsoQuantify ? 'Run Analysis' : 'Run Segmentation'}
 				</button>
-				{#if running}
+				{#if maskStatus && maskStatus.total_masks > 0 && !$segRunning && !quantRunning}
+					<button
+						class="btn btn-secondary font-ui"
+						onclick={startQuantification}
+						disabled={!$sessionId}
+					>
+						<Calculator size={16} />
+						Quantify Existing Masks
+					</button>
+				{/if}
+				{#if $segRunning}
 					<button class="btn btn-secondary font-ui" onclick={handleCancel}>
 						<Square size={16} />
 						Cancel
 					</button>
 				{/if}
-				{#if !running && wsStatus !== 'pending'}
+				{#if !$segRunning && $segWsStatus !== 'pending'}
 					<button class="btn btn-secondary font-ui" onclick={handleReset}>
 						<RotateCcw size={16} />
 						Reset
@@ -214,25 +559,170 @@
 
 		<!-- Status / Preview Panel -->
 		<section class="panel preview-panel">
-			<h2 class="section-header">Segmentation Status</h2>
+			<h2 class="section-header">Analysis Status</h2>
 
 			{#if $segTaskId}
 				<TaskStatus
 					taskId={$segTaskId}
-					status={wsStatus}
-					progress={wsProgress}
-					message={wsMessage}
-					elapsed={wsElapsed}
-					result={wsResult}
+					status={$segWsStatus}
+					progress={$segProgress}
+					message={$segMessage}
+					elapsed={$segElapsed}
+					result={$segResult}
 				/>
-			{:else}
-				<div class="preview-area">
-					<div class="placeholder font-ui">
-						<Microscope size={48} strokeWidth={1} />
-						<p>Configure parameters and run segmentation</p>
-						<p class="hint">Cellpose will detect cells across all loaded conditions</p>
+
+				<!-- Segmentation Preview carousel -->
+				{#if $segCompletedImages.length > 0}
+					<div class="seg-preview">
+						<h3 class="seg-preview-header font-ui">
+							Segmentation Preview
+							<span class="seg-preview-count font-mono">{$segCompletedImages.length} images</span>
+							<span class="style-toggle">
+								<button class="style-btn font-ui" class:active={overlayBg === 'composite'}
+									onclick={() => { overlayBg = 'composite'; }}>Cyto</button>
+								<button class="style-btn font-ui" class:active={overlayBg === 'cyto'}
+									onclick={() => { overlayBg = 'cyto'; }}>Composite</button>
+							</span>
+							<span class="style-toggle">
+								<button class="style-btn font-ui" class:active={overlayStyle === 'filled'}
+									onclick={() => { overlayStyle = 'filled'; }}>Filled</button>
+								<button class="style-btn font-ui" class:active={overlayStyle === 'outline'}
+									onclick={() => { overlayStyle = 'outline'; }}>Outline</button>
+							</span>
+						</h3>
+
+						<!-- Condition tabs -->
+						{#if previewConditions.length > 1}
+							<div class="preview-tabs">
+								{#each previewConditions as cName}
+									<button class="preview-tab font-ui" class:active={activeCondition === cName}
+										onclick={() => { activeCondition = cName; previewIndex = 0; }}>
+										{cName}
+									</button>
+								{/each}
+							</div>
+						{/if}
+
+						<!-- Preview frame -->
+						<div class="preview-frame">
+							{#if previewSrc}
+								{#key previewSrc}
+									<img src={previewSrc} alt="{currentPreview?.condition}/{currentPreview?.baseName}" class="preview-img" />
+								{/key}
+							{/if}
+						</div>
+
+						<!-- Navigation -->
+						<div class="preview-nav">
+							<button class="icon-btn" onclick={prevPreview} disabled={previewIndex === 0}>
+								<ChevronLeft size={18} />
+							</button>
+							<span class="preview-label font-ui">
+								{currentPreview?.condition} / {currentPreview?.baseName}
+								<span class="preview-count font-mono">({previewIndex + 1}/{filteredImages.length})</span>
+							</span>
+							<button class="icon-btn" onclick={nextPreview} disabled={previewIndex >= filteredImages.length - 1}>
+								<ChevronRight size={18} />
+							</button>
+							<button
+								class="icon-btn folder-btn"
+								title="Open result folder"
+								onclick={() => {
+									if (currentPreview && $sessionId) {
+										openResultFolder($sessionId, currentPreview.condition, currentPreview.baseName);
+									}
+								}}
+								disabled={!currentPreview}
+							>
+								<FolderOpen size={16} />
+							</button>
+						</div>
 					</div>
-				</div>
+				{/if}
+
+				<details class="log-panel">
+					<summary class="log-summary font-ui">
+						Terminal Output {#if $segLogs.length > 0}<span class="log-count">{$segLogs.length} lines</span>{/if}
+					</summary>
+					<pre class="log-output font-mono" bind:this={logPre}>{$segLogs.length > 0 ? $segLogs.join('\n') : 'Waiting for output...'}</pre>
+				</details>
+
+				<!-- Quantification status (when chained) -->
+				{#if alsoQuantify && (quantStatus !== 'pending' || quantRunning)}
+					<div class="quant-status">
+						<h3 class="quant-status-header font-ui">
+							<Calculator size={14} />
+							Quantification
+						</h3>
+						{#if quantRunning}
+							<div class="quant-progress-row">
+								<div class="quant-progress-bar">
+									<div class="quant-progress-fill" style="width: {quantProgress}%"></div>
+								</div>
+								<span class="quant-progress-pct font-mono">{Math.round(quantProgress)}%</span>
+							</div>
+							<p class="quant-message font-ui">{quantMessage}</p>
+						{:else if quantStatus === 'complete'}
+							<p class="quant-done font-ui">
+								Quantification complete
+								{#if quantResult}
+									— {quantResult.total_cells} cells,
+									{quantResult.qc_rejected} QC rejected,
+									{quantResult.outliers_flagged} outliers flagged
+								{/if}
+							</p>
+						{:else if quantStatus === 'error'}
+							<p class="quant-error font-ui">{quantMessage}</p>
+						{/if}
+					</div>
+				{/if}
+			{:else}
+				<!-- Standalone quantification status (no seg task running) -->
+				{#if quantStatus !== 'pending' || quantRunning}
+					<div class="quant-status">
+						<h3 class="quant-status-header font-ui">
+							<Calculator size={14} />
+							Quantification
+						</h3>
+						{#if quantRunning}
+							<div class="quant-progress-row">
+								<div class="quant-progress-bar">
+									<div class="quant-progress-fill" style="width: {quantProgress}%"></div>
+								</div>
+								<span class="quant-progress-pct font-mono">{Math.round(quantProgress)}%</span>
+							</div>
+							<p class="quant-message font-ui">{quantMessage}</p>
+						{:else if quantStatus === 'complete'}
+							<p class="quant-done font-ui">
+								Quantification complete
+								{#if quantResult}
+									— {quantResult.total_cells} cells,
+									{quantResult.qc_rejected} QC rejected,
+									{quantResult.outliers_flagged} outliers flagged
+								{/if}
+							</p>
+						{:else if quantStatus === 'error'}
+							<p class="quant-error font-ui">{quantMessage}</p>
+						{/if}
+
+						{#if $segLogs.length > 0}
+							<details class="log-panel" style="margin-top: 12px;" open>
+								<summary class="log-summary font-ui">
+									Terminal Output <span class="log-count">{$segLogs.length} lines</span>
+								</summary>
+								<pre class="log-output font-mono" bind:this={logPre}>{$segLogs.join('\n')}</pre>
+							</details>
+						{/if}
+					</div>
+				{:else}
+					<div class="preview-area">
+						<div class="placeholder font-ui">
+							<Microscope size={48} strokeWidth={1} />
+							<p>Configure parameters and run segmentation</p>
+							<p class="hint">Cellpose will detect cells across all loaded conditions</p>
+						</div>
+					</div>
+				{/if}
 			{/if}
 		</section>
 	</div>
@@ -405,6 +895,315 @@
 	.placeholder .hint {
 		font-size: 11px;
 		margin-top: 4px;
+	}
+
+	/* ── Segmentation preview ──────────────────────────── */
+
+	.seg-preview {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-md);
+		padding: 12px;
+	}
+
+	.seg-preview-header {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--text);
+		margin: 0 0 10px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.seg-preview-count {
+		font-weight: 400;
+		font-size: 11px;
+		color: var(--text-faint);
+	}
+
+	.style-toggle {
+		margin-left: auto;
+		display: flex;
+		gap: 1px;
+		background: var(--border);
+		border-radius: var(--radius-sm);
+		overflow: hidden;
+	}
+
+	.style-btn {
+		background: var(--bg-elevated);
+		border: none;
+		padding: 3px 10px;
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--text-muted);
+		cursor: pointer;
+		transition: all var(--transition-fast);
+	}
+
+	.style-btn:hover {
+		color: var(--text);
+	}
+
+	.style-btn.active {
+		background: var(--accent);
+		color: white;
+	}
+
+	:global(.dark) .style-btn.active {
+		color: #000;
+	}
+
+	.preview-tabs {
+		display: flex;
+		gap: 1px;
+		margin-bottom: 8px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.preview-tab {
+		background: none;
+		border: none;
+		padding: 5px 12px;
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text-muted);
+		cursor: pointer;
+		border-bottom: 2px solid transparent;
+		transition: all var(--transition-fast);
+	}
+
+	.preview-tab:hover {
+		color: var(--text);
+	}
+
+	.preview-tab.active {
+		color: var(--accent);
+		border-bottom-color: var(--accent);
+	}
+
+	.preview-frame {
+		background: #000;
+		border-radius: var(--radius-md);
+		overflow: hidden;
+		position: relative;
+		aspect-ratio: 4 / 3;
+	}
+
+	.preview-img {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		object-fit: contain;
+	}
+
+	.preview-nav {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 10px;
+		margin-top: 8px;
+	}
+
+	.preview-label {
+		font-size: 12px;
+		color: var(--text);
+		text-align: center;
+	}
+
+	.preview-count {
+		color: var(--text-muted);
+		font-size: 11px;
+	}
+
+	.icon-btn {
+		background: none;
+		border: none;
+		color: var(--text-muted);
+		cursor: pointer;
+		padding: 4px;
+		display: inline-flex;
+		align-items: center;
+		border-radius: var(--radius-sm);
+	}
+
+	.icon-btn:hover:not(:disabled) {
+		color: var(--accent);
+		background: var(--accent-soft);
+	}
+
+	.icon-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	.folder-btn {
+		margin-left: 8px;
+	}
+
+	/* ── Log panel ──────────────────────────────────────── */
+
+	.log-panel {
+		margin-top: 16px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+	}
+
+	.log-summary {
+		padding: 10px 14px;
+		cursor: pointer;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--text);
+		user-select: none;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.log-summary:hover {
+		color: var(--accent);
+	}
+
+	.log-count {
+		font-weight: 400;
+		font-size: 11px;
+		color: var(--text-faint);
+	}
+
+	.log-output {
+		max-height: 320px;
+		overflow-y: auto;
+		padding: 12px 14px;
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.5;
+		color: #d4d4d4;
+		background: #1e1e1e;
+		border-top: 1px solid var(--border);
+		white-space: pre-wrap;
+		word-break: break-all;
+	}
+
+	/* ── Mask status banner ───────────────────────────── */
+
+	.mask-banner {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 14px;
+		background: var(--accent-soft);
+		border: 1px solid var(--accent);
+		border-radius: var(--radius-md);
+		font-size: 12px;
+		color: var(--accent);
+		margin-top: 4px;
+	}
+
+	.results-banner {
+		background: rgba(76, 175, 80, 0.08);
+		border-color: rgba(76, 175, 80, 0.4);
+		color: #4caf50;
+	}
+
+	.results-banner a {
+		color: inherit;
+		text-decoration: underline;
+	}
+
+	/* ── Quantify toggle + chained status ──────────────── */
+
+	.divider {
+		height: 1px;
+		background: var(--border);
+		margin: 4px 0;
+	}
+
+	.quantify-toggle {
+		color: var(--accent) !important;
+	}
+
+	.marker-list {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		margin-top: 2px;
+	}
+
+	.marker-tag {
+		font-size: 10px;
+		padding: 2px 8px;
+		background: var(--accent-soft);
+		color: var(--accent);
+		border-radius: var(--radius-pill);
+	}
+
+	.quant-status {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-md);
+		padding: 12px;
+		margin-top: 12px;
+	}
+
+	.quant-status-header {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--accent);
+		margin: 0 0 10px;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.quant-progress-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.quant-progress-bar {
+		flex: 1;
+		height: 6px;
+		background: var(--border);
+		border-radius: 3px;
+		overflow: hidden;
+	}
+
+	.quant-progress-fill {
+		height: 100%;
+		background: var(--accent);
+		border-radius: 3px;
+		transition: width 0.3s ease;
+	}
+
+	.quant-progress-pct {
+		font-size: 11px;
+		color: var(--text-muted);
+		min-width: 36px;
+		text-align: right;
+	}
+
+	.quant-message {
+		font-size: 11px;
+		color: var(--text-muted);
+		margin: 6px 0 0;
+	}
+
+	.quant-done {
+		font-size: 12px;
+		color: var(--accent);
+		margin: 0;
+	}
+
+	.quant-error {
+		font-size: 12px;
+		color: #e44;
+		margin: 0;
 	}
 
 	@media (max-width: 900px) {

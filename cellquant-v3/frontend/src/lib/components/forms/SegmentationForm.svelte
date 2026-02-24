@@ -5,6 +5,7 @@
 	import { segParams } from '$stores/segmentation';
 
 	const models = [
+		{ value: 'cpsam', label: 'Cellpose-SAM' },
 		{ value: 'cyto3', label: 'Cyto3' },
 		{ value: 'cyto2', label: 'Cyto2' },
 		{ value: 'nuclei', label: 'Nuclei' },

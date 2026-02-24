@@ -9,6 +9,7 @@ from cellquant.api.schemas.quantification import (
     QuantificationRequest,
     ResultsPageResponse,
     SummaryStatsResponse,
+    QCSummaryResponse,
 )
 from cellquant.tasks.worker import run_quantification_task
 
@@ -26,6 +27,10 @@ async def start_quantification(req: QuantificationRequest):
         "marker_suffixes": req.marker_suffixes,
         "marker_names": req.marker_names,
         "mitochondrial_markers": req.mitochondrial_markers,
+        "qc_filters": req.qc_filters.model_dump(),
+        "negative_control_path": req.negative_control_path,
+        "manual_background_value": req.manual_background_value,
+        "outlier_threshold": req.outlier_threshold,
     }
 
     task_id = queue.submit(
@@ -109,4 +114,30 @@ async def get_summary(session_id: str):
         n_conditions=df["Condition"].nunique(),
         n_image_sets=df["ImageSet"].nunique() if "ImageSet" in df.columns else 0,
         per_condition=per_condition,
+    )
+
+
+@router.get("/qc-summary/{session_id}", response_model=QCSummaryResponse)
+async def get_qc_summary(session_id: str):
+    """Get hierarchical QC summary (cells -> FOVs -> conditions)."""
+    from cellquant.core.quantification.outliers import (
+        per_fov_aggregation,
+        hierarchical_summary,
+    )
+
+    session = get_session(session_id)
+
+    if session.results_df is None:
+        session.load_results()
+
+    if session.results_df is None or len(session.results_df) == 0:
+        return QCSummaryResponse(summary=[], fov_data=[])
+
+    df = session.results_df
+    fov_df = per_fov_aggregation(df)
+    summary_df = hierarchical_summary(df, fov_df)
+
+    return QCSummaryResponse(
+        summary=summary_df.to_dict(orient="records") if len(summary_df) > 0 else [],
+        fov_data=fov_df.to_dict(orient="records") if len(fov_df) > 0 else [],
     )

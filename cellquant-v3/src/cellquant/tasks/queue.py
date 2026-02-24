@@ -1,6 +1,9 @@
 """Background task queue for long-running operations."""
 
 import asyncio
+import io
+import logging
+import sys
 import uuid
 import time
 import traceback
@@ -26,6 +29,8 @@ class TaskInfo:
     error: Optional[str] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
+    logs: List[str] = field(default_factory=list)
+    progress_data: Optional[dict] = None  # Transient data sent with progress msgs
 
     @property
     def elapsed(self) -> float:
@@ -33,6 +38,112 @@ class TaskInfo:
             return 0.0
         end = self.completed_at or time.time()
         return end - self.started_at
+
+
+class LogCapture:
+    """Context manager that captures stdout/stderr and Python logging to a task.
+
+    Cellpose and other libraries use the logging module rather than print,
+    so we attach a temporary handler to the root logger to catch those too.
+    """
+
+    _LOGGER_NAMES = ["cellpose"]
+
+    def __init__(self, task: TaskInfo, notify: Callable):
+        self._task = task
+        self._notify = notify
+        self._old_stdout: Any = None
+        self._old_stderr: Any = None
+        self._log_handlers: List[tuple] = []  # (logger, handler)
+
+    def __enter__(self):
+        # Redirect stdout/stderr
+        self._old_stdout = sys.stdout
+        self._old_stderr = sys.stderr
+        sys.stdout = _LineWriter(self._task, self._notify, self._old_stdout)
+        sys.stderr = _LineWriter(self._task, self._notify, self._old_stderr)
+
+        # Add logging handler to capture library log messages
+        handler = _TaskLogHandler(self._task, self._notify)
+        handler.setFormatter(logging.Formatter("%(name)s - %(message)s"))
+        handler.setLevel(logging.DEBUG)
+        for name in self._LOGGER_NAMES:
+            logger = logging.getLogger(name)
+            # Save original level so we can restore it
+            self._log_handlers.append((logger, handler, logger.level))
+            logger.setLevel(logging.DEBUG)
+            logger.addHandler(handler)
+
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout = self._old_stdout
+        sys.stderr = self._old_stderr
+        for logger, handler, original_level in self._log_handlers:
+            logger.removeHandler(handler)
+            logger.setLevel(original_level)
+        self._log_handlers.clear()
+        return False
+
+
+class _LineWriter(io.TextIOBase):
+    """Write-only stream that appends each line to task.logs and notifies."""
+
+    def __init__(self, task: TaskInfo, notify: Callable, passthrough):
+        self._task = task
+        self._notify_fn = notify
+        self._passthrough = passthrough
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        # Also write to original stream so terminal still shows output
+        if self._passthrough:
+            try:
+                self._passthrough.write(s)
+                self._passthrough.flush()
+            except Exception:
+                pass
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._task.logs.append(line)
+            self._notify_fn(self._task.session_id, self._task)
+        return len(s)
+
+    def flush(self):
+        # Flush any partial line
+        if self._buf:
+            self._task.logs.append(self._buf)
+            self._buf = ""
+            self._notify_fn(self._task.session_id, self._task)
+        if self._passthrough:
+            try:
+                self._passthrough.flush()
+            except Exception:
+                pass
+
+    @property
+    def encoding(self):
+        return getattr(self._passthrough, "encoding", "utf-8")
+
+
+class _TaskLogHandler(logging.Handler):
+    """Logging handler that appends formatted records to task.logs."""
+
+    def __init__(self, task: TaskInfo, notify: Callable):
+        super().__init__()
+        self._task = task
+        self._notify_fn = notify
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            msg = self.format(record)
+            self._task.logs.append(msg)
+            self._notify_fn(self._task.session_id, self._task)
+        except Exception:
+            pass
 
 
 class TaskQueue:
@@ -61,7 +172,8 @@ class TaskQueue:
             task.started_at = time.time()
             self._notify(session_id, task)
             try:
-                result = fn(task, *args, **kwargs)
+                with LogCapture(task, self._notify):
+                    result = fn(task, *args, **kwargs)
                 task.status = "complete"
                 task.result = result
                 task.progress = 100.0
@@ -123,7 +235,11 @@ class TaskQueue:
             "image_set": task.image_set,
             "message": task.message,
             "elapsed_seconds": task.elapsed,
+            "logs": list(task.logs),
         }
+        if task.progress_data:
+            msg["data"] = task.progress_data
+            task.progress_data = None  # Consume after sending
         if task.status == "complete" and task.result:
             msg["data"] = task.result
         if task.status == "error":

@@ -8,17 +8,19 @@
 		PenTool,
 		Calculator,
 		BarChart3,
+		ScrollText,
 		PanelLeftClose,
 		PanelLeftOpen
 	} from 'lucide-svelte';
 
 	const navItems = [
 		{ href: '/experiment', label: 'Experiment', icon: FlaskConical },
-		{ href: '/segmentation', label: 'Segmentation', icon: Microscope },
+		{ href: '/segmentation', label: 'Analysis', icon: Microscope },
 		{ href: '/tracking', label: 'Tracking', icon: Route },
 		{ href: '/editor', label: 'Mask Editor', icon: PenTool },
 		{ href: '/quantification', label: 'Quantification', icon: Calculator },
-		{ href: '/results', label: 'Results', icon: BarChart3 }
+		{ href: '/results', label: 'Results', icon: BarChart3 },
+		{ href: '/logs', label: 'Logs', icon: ScrollText }
 	];
 
 	let collapsed = $derived($sidebarCollapsed);
@@ -31,7 +33,7 @@
 >
 	<div class="sidebar-header">
 		{#if !collapsed}
-			<span class="sidebar-brand font-display">CQ</span>
+			<span class="sidebar-brand font-display">CellQuant</span>
 		{/if}
 		<button
 			class="sidebar-toggle"

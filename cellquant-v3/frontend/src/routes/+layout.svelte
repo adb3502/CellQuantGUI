@@ -4,11 +4,19 @@
 	import Header from '$components/layout/Header.svelte';
 	import { sidebarCollapsed } from '$stores/ui';
 	import { page } from '$app/stores';
+	import { sessionId } from '$stores/session';
+	import { segRunning } from '$stores/segmentation';
 	import type { Snippet } from 'svelte';
 
 	let { children }: { children: Snippet } = $props();
 
 	let collapsed = $derived($sidebarCollapsed);
+
+	function handleBeforeUnload(e: BeforeUnloadEvent) {
+		if ($sessionId || $segRunning) {
+			e.preventDefault();
+		}
+	}
 
 	// Page titles
 	const pageTitles: Record<string, string> = {
@@ -17,11 +25,14 @@
 		'/tracking': 'Cell Tracking',
 		'/editor': 'Mask Editor',
 		'/quantification': 'Quantification',
-		'/results': 'Results & Export'
+		'/results': 'Results & Export',
+		'/logs': 'Analysis Log'
 	};
 
 	let pageTitle = $derived(pageTitles[$page.url.pathname] ?? 'CellQuant');
 </script>
+
+<svelte:window onbeforeunload={handleBeforeUnload} />
 
 <div class="app-shell" class:collapsed>
 	<Sidebar />
@@ -57,7 +68,9 @@
 	.app-content {
 		flex: 1;
 		overflow-y: auto;
-		padding: 24px;
+		padding: 14px 16px 14px 12px;
 		background: var(--bg);
+		display: flex;
+		flex-direction: column;
 	}
 </style>
