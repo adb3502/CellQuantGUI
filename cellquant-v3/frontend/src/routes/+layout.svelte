@@ -24,6 +24,7 @@
 		'/segmentation': 'Segmentation',
 		'/tracking': 'Cell Tracking',
 		'/editor': 'Mask Editor',
+		'/training': 'Model Training',
 		'/quantification': 'Quantification',
 		'/results': 'Results & Export',
 		'/logs': 'Analysis Log'

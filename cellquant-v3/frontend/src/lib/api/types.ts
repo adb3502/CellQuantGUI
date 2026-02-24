@@ -75,6 +75,7 @@ export interface SegmentationParams {
 	use_gpu: boolean;
 	batch_size: number;
 	skip_existing?: boolean;
+	custom_model_path?: string | null;
 }
 
 export interface SegmentationStatus {
@@ -211,4 +212,15 @@ export interface SessionInfo {
 	experiment_path?: string;
 	n_conditions: number;
 	n_images: number;
+}
+
+// ── Training ─────────────────────────────────────────────
+
+export interface CustomModelInfo {
+	name: string;
+	path: string;
+	base_model: string;
+	n_training_images: number;
+	created_at: number;
+	final_loss?: number;
 }

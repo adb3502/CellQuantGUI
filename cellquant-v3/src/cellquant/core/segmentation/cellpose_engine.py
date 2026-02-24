@@ -83,7 +83,8 @@ class CellposeEngine:
         self,
         model_type: str = "cpsam",
         use_gpu: bool = True,
-        batch_size: int = 4
+        batch_size: int = 4,
+        custom_model_path: Optional[str] = None,
     ):
         """
         Initialize the segmentation engine.
@@ -92,19 +93,21 @@ class CellposeEngine:
             model_type: Cellpose model to use
             use_gpu: Whether to use GPU acceleration
             batch_size: Number of images to process per batch
+            custom_model_path: Path to a fine-tuned model (overrides model_type)
         """
         if not HAS_CELLPOSE:
             raise ImportError(
                 "Cellpose required. Install with: pip install cellpose"
             )
 
-        if model_type not in self.SUPPORTED_MODELS:
+        if not custom_model_path and model_type not in self.SUPPORTED_MODELS:
             warnings.warn(
                 f"Model '{model_type}' not in standard list. "
                 f"Supported: {self.SUPPORTED_MODELS}"
             )
 
         self.model_type = model_type
+        self.custom_model_path = custom_model_path
         self.use_gpu = use_gpu and CUDA_AVAILABLE
         self.batch_size = batch_size
         self._model = None
@@ -116,10 +119,16 @@ class CellposeEngine:
     def model(self):
         """Lazy load the Cellpose model."""
         if self._model is None:
-            self._model = models.CellposeModel(
-                gpu=self.use_gpu,
-                model_type=self.model_type
-            )
+            if self.custom_model_path:
+                self._model = models.CellposeModel(
+                    gpu=self.use_gpu,
+                    pretrained_model=self.custom_model_path,
+                )
+            else:
+                self._model = models.CellposeModel(
+                    gpu=self.use_gpu,
+                    model_type=self.model_type,
+                )
         return self._model
 
     def segment_single(

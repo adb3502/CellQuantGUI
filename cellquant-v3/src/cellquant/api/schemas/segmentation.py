@@ -15,6 +15,7 @@ class SegmentationRequest(BaseModel):
     use_gpu: bool = True
     batch_size: int = 4
     skip_existing: bool = False
+    custom_model_path: Optional[str] = None
 
 
 class SegmentationStatusResponse(BaseModel):

@@ -9,6 +9,7 @@
 		Calculator,
 		BarChart3,
 		ScrollText,
+		Brain,
 		PanelLeftClose,
 		PanelLeftOpen
 	} from 'lucide-svelte';
@@ -18,6 +19,7 @@
 		{ href: '/segmentation', label: 'Analysis', icon: Microscope },
 		{ href: '/tracking', label: 'Tracking', icon: Route },
 		{ href: '/editor', label: 'Mask Editor', icon: PenTool },
+		{ href: '/training', label: 'Training', icon: Brain },
 		{ href: '/quantification', label: 'Quantification', icon: Calculator },
 		{ href: '/results', label: 'Results', icon: BarChart3 },
 		{ href: '/logs', label: 'Logs', icon: ScrollText }

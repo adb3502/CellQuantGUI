@@ -462,6 +462,71 @@ export async function launchNapari(
 	});
 }
 
+// ── Training ─────────────────────────────────────────────
+
+export async function getTrainingData(
+	sessionId: string
+): Promise<{ pair_count: number; pairs: { key: string; condition: string; base_name: string; collected_at: number }[] }> {
+	return request(`/training/data/${sessionId}`);
+}
+
+export async function collectTrainingPair(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): Promise<{ success: boolean; pair_count: number }> {
+	return request(`/training/data/${sessionId}/collect`, {
+		method: 'POST',
+		body: JSON.stringify({ condition, base_name: baseName })
+	});
+}
+
+export async function removeTrainingPair(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): Promise<{ success: boolean; pair_count: number }> {
+	return request(`/training/data/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}`, {
+		method: 'DELETE'
+	});
+}
+
+export async function startFinetune(params: {
+	session_id: string;
+	base_model?: string;
+	model_name?: string;
+	n_epochs?: number;
+	learning_rate?: number;
+	batch_size?: number;
+}): Promise<{ task_id: string }> {
+	return request('/training/finetune', {
+		method: 'POST',
+		body: JSON.stringify(params)
+	});
+}
+
+export async function getFinetuneStatus(taskId: string): Promise<{
+	task_id: string;
+	status: string;
+	progress: number;
+	message: string;
+}> {
+	return request(`/training/status/${taskId}`);
+}
+
+export async function listCustomModels(): Promise<{
+	models: {
+		name: string;
+		path: string;
+		base_model: string;
+		n_training_images: number;
+		created_at: number;
+		final_loss?: number;
+	}[];
+}> {
+	return request('/training/models');
+}
+
 // ── Health ───────────────────────────────────────────────
 
 export async function healthCheck(): Promise<{ status: string; version: string }> {

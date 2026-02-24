@@ -26,11 +26,13 @@ def run_segmentation_task(
     import numpy as np
 
     params = SegmentationParams(**seg_params)
+    custom_model_path = seg_params.get("custom_model_path")
     print(f"[CellQuant] Initializing Cellpose engine: model={params.model_type}, gpu={params.use_gpu}, batch={params.batch_size}")
     engine = CellposeEngine(
         model_type=params.model_type,
         use_gpu=params.use_gpu,
         batch_size=params.batch_size,
+        custom_model_path=custom_model_path,
     )
     print(f"[CellQuant] Engine created, loading model...")
 
