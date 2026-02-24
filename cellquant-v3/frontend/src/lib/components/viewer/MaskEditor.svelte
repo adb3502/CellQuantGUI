@@ -1,11 +1,14 @@
 <script lang="ts">
 	/**
 	 * Mask editing controller.
-	 * Handles click-to-select, delete, and merge operations
-	 * on the mask overlay via OpenLayers map click events.
+	 * Handles click-to-select, delete, merge, draw polygon, and flood fill
+	 * via OpenLayers map click events and Draw interaction.
 	 */
 	import { onDestroy } from 'svelte';
-	import { getCellAt, deleteCell, mergeCells } from '$api/client';
+	import {
+		getCellAt, deleteCell, mergeCells,
+		addCellPolygon, addCellFlood
+	} from '$api/client';
 
 	let {
 		map = null,
@@ -20,17 +23,18 @@
 		sessionId: string;
 		condition: string;
 		baseName: string;
-		activeTool?: 'select' | 'delete' | 'merge';
+		activeTool?: 'select' | 'delete' | 'merge' | 'draw' | 'flood';
 		selectedCells?: number[];
 		onMaskChanged?: () => void;
 	} = $props();
 
 	let clickKey: any = null;
+	let drawInteraction: any = null;
+	let drawSource: any = null;
 
 	$effect(() => {
 		if (!map) return;
 
-		// Remove previous listener
 		if (clickKey) {
 			map.un('singleclick', handleMapClick);
 		}
@@ -44,8 +48,66 @@
 		};
 	});
 
+	// Manage draw interaction based on activeTool
+	$effect(() => {
+		if (!map) return;
+
+		// Clean up previous draw interaction
+		if (drawInteraction) {
+			map.removeInteraction(drawInteraction);
+			drawInteraction = null;
+			drawSource = null;
+		}
+
+		if (activeTool === 'draw') {
+			setupDrawInteraction();
+		}
+
+		return () => {
+			if (drawInteraction && map) {
+				map.removeInteraction(drawInteraction);
+				drawInteraction = null;
+				drawSource = null;
+			}
+		};
+	});
+
+	async function setupDrawInteraction() {
+		const { default: Draw } = await import('ol/interaction/Draw');
+		const { default: VectorSource } = await import('ol/source/Vector');
+
+		const source = new VectorSource();
+		const draw = new Draw({ source, type: 'Polygon' });
+
+		draw.on('drawend', async (evt: any) => {
+			const geometry = evt.feature.getGeometry();
+			const coords = geometry.getCoordinates()[0]; // outer ring
+			// OpenLayers coords are [x, y] = [col, row]
+			const polygonCoords = coords.map((c: number[]) => [
+				Math.floor(c[1]), // row
+				Math.floor(c[0])  // col
+			]);
+
+			try {
+				await addCellPolygon(sessionId, condition, baseName, polygonCoords);
+				onMaskChanged?.();
+			} catch {
+				// ignore errors
+			}
+
+			source.clear();
+		});
+
+		drawInteraction = draw;
+		drawSource = source;
+		map.addInteraction(draw);
+	}
+
 	async function handleMapClick(evt: any) {
 		if (!sessionId || !condition || !baseName) return;
+
+		// Don't handle clicks when draw tool is active
+		if (activeTool === 'draw') return;
 
 		const coord = evt.coordinate;
 		const col = Math.floor(coord[0]);
@@ -54,6 +116,12 @@
 		if (row < 0 || col < 0) return;
 
 		try {
+			if (activeTool === 'flood') {
+				await addCellFlood(sessionId, condition, baseName, row, col);
+				onMaskChanged?.();
+				return;
+			}
+
 			const { cell_id } = await getCellAt(sessionId, condition, baseName, row, col);
 
 			if (cell_id === 0) {
@@ -85,13 +153,16 @@
 				}
 			}
 		} catch {
-			// Silently ignore cell lookup failures (e.g. clicking outside image bounds)
+			// Silently ignore cell lookup failures
 		}
 	}
 
 	onDestroy(() => {
 		if (map && clickKey) {
 			map.un('singleclick', handleMapClick);
+		}
+		if (drawInteraction && map) {
+			map.removeInteraction(drawInteraction);
 		}
 	});
 </script>

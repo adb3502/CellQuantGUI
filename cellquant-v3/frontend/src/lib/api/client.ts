@@ -264,6 +264,120 @@ export async function getMaskStats(
 	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/stats`);
 }
 
+export async function addCellPolygon(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	polygonCoords: number[][],
+	overwrite: boolean = false
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/add-cell`, {
+		method: 'PUT',
+		body: JSON.stringify({ polygon_coords: polygonCoords, overwrite })
+	});
+}
+
+export async function addCellFlood(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	row: number,
+	col: number,
+	threshold: number = 0.3
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/add-cell-flood`, {
+		method: 'PUT',
+		body: JSON.stringify({ row, col, threshold })
+	});
+}
+
+export async function dilateCells(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	cellIds: number[],
+	iterations: number = 1
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/dilate`, {
+		method: 'PUT',
+		body: JSON.stringify({ cell_ids: cellIds, iterations })
+	});
+}
+
+export async function erodeCells(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	cellIds: number[],
+	iterations: number = 1
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/erode`, {
+		method: 'PUT',
+		body: JSON.stringify({ cell_ids: cellIds, iterations })
+	});
+}
+
+export async function smoothMasks(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	cellIds?: number[],
+	sigma: number = 1.0
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/smooth`, {
+		method: 'PUT',
+		body: JSON.stringify({ cell_ids: cellIds ?? null, sigma })
+	});
+}
+
+export async function fillHoles(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	maxHoleSize?: number
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/fill-holes`, {
+		method: 'PUT',
+		body: JSON.stringify({ max_hole_size: maxHoleSize ?? null })
+	});
+}
+
+export async function cleanSmall(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	minSize: number = 50
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/clean-small`, {
+		method: 'PUT',
+		body: JSON.stringify({ min_size: minSize })
+	});
+}
+
+export async function undoMaskEdit(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): Promise<{ success: boolean; n_cells: number }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/undo`, {
+		method: 'POST'
+	});
+}
+
+export async function getUndoDepth(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): Promise<{ depth: number; can_undo: boolean }> {
+	return request(`/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/undo-depth`);
+}
+
+export async function getEditStatus(
+	sessionId: string
+): Promise<{ edited_images: { condition: string; base_name: string }[] }> {
+	return request(`/masks/${sessionId}/edit-status`);
+}
+
 // ── Quantification ───────────────────────────────────────
 
 export async function runQuantification(

@@ -33,8 +33,30 @@ class Session:
     dark_master: Optional[np.ndarray] = None
     flat_norm: Optional[np.ndarray] = None
 
+    # Edit history (undo system) — initialized lazily
+    _edit_history: Optional[any] = field(default=None, repr=False)
+
+    # Training data collector — initialized lazily
+    _training_collector: Optional[any] = field(default=None, repr=False)
+
     # Results
     results_df: Optional[pd.DataFrame] = None
+
+    @property
+    def edit_history(self):
+        """Lazy-init edit history."""
+        if self._edit_history is None:
+            from cellquant.core.segmentation.edit_history import EditHistory
+            self._edit_history = EditHistory(self.directory)
+        return self._edit_history
+
+    @property
+    def training_collector(self):
+        """Lazy-init training data collector."""
+        if self._training_collector is None:
+            from cellquant.core.segmentation.training_data import TrainingDataCollector
+            self._training_collector = TrainingDataCollector(self.directory)
+        return self._training_collector
 
     def get_tile_dir(self, condition: str, base_name: str, channel: str) -> Path:
         p = self.directory / "tiles" / condition / base_name / channel

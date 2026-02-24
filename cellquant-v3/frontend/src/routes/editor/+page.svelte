@@ -1,14 +1,22 @@
 <script lang="ts">
-	import { PenTool, Trash2, Merge, MousePointer, Eye, EyeOff, Maximize2, ExternalLink } from 'lucide-svelte';
+	import {
+		PenTool, Trash2, Merge, MousePointer, Eye, EyeOff,
+		ExternalLink, Undo2, Pencil, Droplets, Expand, Shrink,
+		Sparkles, CircleDot, Eraser
+	} from 'lucide-svelte';
 	import { sessionId } from '$stores/session';
 	import { conditions, selectedCondition } from '$stores/experiment';
-	import { getImageMetadata, getMaskStats, launchNapari } from '$api/client';
+	import {
+		getImageMetadata, getMaskStats, launchNapari,
+		undoMaskEdit, dilateCells, erodeCells, smoothMasks,
+		fillHoles, cleanSmall
+	} from '$api/client';
 	import ImageViewer from '$components/viewer/ImageViewer.svelte';
 	import MaskOverlay from '$components/viewer/MaskOverlay.svelte';
 	import MaskEditor from '$components/viewer/MaskEditor.svelte';
 	import ThumbnailGrid from '$components/viewer/ThumbnailGrid.svelte';
 
-	type EditorTool = 'select' | 'delete' | 'merge';
+	type EditorTool = 'select' | 'delete' | 'merge' | 'draw' | 'flood';
 
 	let activeTool = $state<EditorTool>('select');
 	let showMasks = $state(true);
@@ -20,11 +28,14 @@
 	let imgHeight = $state(0);
 	let maskRefreshKey = $state(0);
 	let maskStats = $state<{ n_cells: number } | null>(null);
+	let operationPending = $state(false);
 
-	const tools = [
-		{ id: 'select' as EditorTool, label: 'Select', icon: MousePointer },
-		{ id: 'delete' as EditorTool, label: 'Delete Cell', icon: Trash2 },
-		{ id: 'merge' as EditorTool, label: 'Merge Cells', icon: Merge }
+	const tools: { id: EditorTool; label: string; icon: any }[] = [
+		{ id: 'select', label: 'Select', icon: MousePointer },
+		{ id: 'delete', label: 'Delete', icon: Trash2 },
+		{ id: 'merge', label: 'Merge', icon: Merge },
+		{ id: 'draw', label: 'Draw', icon: Pencil },
+		{ id: 'flood', label: 'Fill', icon: Droplets }
 	];
 
 	let currentImages = $derived(
@@ -66,15 +77,90 @@
 		loadMaskStats();
 	}
 
+	async function handleUndo() {
+		if (!$sessionId || !$selectedCondition || !selectedImage) return;
+		try {
+			await undoMaskEdit($sessionId, $selectedCondition, selectedImage);
+			handleMaskChanged();
+		} catch {
+			// Nothing to undo
+		}
+	}
+
+	async function handleDilate() {
+		if (!$sessionId || !$selectedCondition || !selectedImage || selectedCells.length === 0) return;
+		operationPending = true;
+		try {
+			await dilateCells($sessionId, $selectedCondition, selectedImage, selectedCells, 1);
+			handleMaskChanged();
+		} finally {
+			operationPending = false;
+		}
+	}
+
+	async function handleErode() {
+		if (!$sessionId || !$selectedCondition || !selectedImage || selectedCells.length === 0) return;
+		operationPending = true;
+		try {
+			await erodeCells($sessionId, $selectedCondition, selectedImage, selectedCells, 1);
+			handleMaskChanged();
+		} finally {
+			operationPending = false;
+		}
+	}
+
+	async function handleSmooth() {
+		if (!$sessionId || !$selectedCondition || !selectedImage) return;
+		operationPending = true;
+		try {
+			const ids = selectedCells.length > 0 ? selectedCells : undefined;
+			await smoothMasks($sessionId, $selectedCondition, selectedImage, ids);
+			handleMaskChanged();
+		} finally {
+			operationPending = false;
+		}
+	}
+
+	async function handleFillHoles() {
+		if (!$sessionId || !$selectedCondition || !selectedImage) return;
+		operationPending = true;
+		try {
+			await fillHoles($sessionId, $selectedCondition, selectedImage);
+			handleMaskChanged();
+		} finally {
+			operationPending = false;
+		}
+	}
+
+	async function handleCleanSmall() {
+		if (!$sessionId || !$selectedCondition || !selectedImage) return;
+		operationPending = true;
+		try {
+			await cleanSmall($sessionId, $selectedCondition, selectedImage, 50);
+			handleMaskChanged();
+		} finally {
+			operationPending = false;
+		}
+	}
+
 	async function handleLaunchNapari() {
 		if (!$sessionId || !$selectedCondition || !selectedImage) return;
 		try {
 			await launchNapari($sessionId, $selectedCondition, selectedImage);
-		} catch (e) {
+		} catch {
 			// Napari may not be available
 		}
 	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.ctrlKey && e.key === 'z') {
+			e.preventDefault();
+			handleUndo();
+		}
+	}
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="page-editor">
 	<!-- Toolbar -->
@@ -95,6 +181,67 @@
 
 		<div class="tool-separator"></div>
 
+		<!-- Undo -->
+		<button
+			class="tool-btn font-ui"
+			onclick={handleUndo}
+			title="Undo (Ctrl+Z)"
+			disabled={!selectedImage}
+		>
+			<Undo2 size={16} />
+		</button>
+
+		<div class="tool-separator"></div>
+
+		<!-- Batch operations -->
+		<button
+			class="tool-btn font-ui"
+			onclick={handleDilate}
+			title="Dilate selected"
+			disabled={selectedCells.length === 0 || operationPending}
+		>
+			<Expand size={16} />
+			<span class="tool-label">Dilate</span>
+		</button>
+		<button
+			class="tool-btn font-ui"
+			onclick={handleErode}
+			title="Erode selected"
+			disabled={selectedCells.length === 0 || operationPending}
+		>
+			<Shrink size={16} />
+			<span class="tool-label">Erode</span>
+		</button>
+		<button
+			class="tool-btn font-ui"
+			onclick={handleSmooth}
+			title="Smooth boundaries"
+			disabled={!selectedImage || operationPending}
+		>
+			<Sparkles size={16} />
+			<span class="tool-label">Smooth</span>
+		</button>
+		<button
+			class="tool-btn font-ui"
+			onclick={handleFillHoles}
+			title="Fill holes in cells"
+			disabled={!selectedImage || operationPending}
+		>
+			<CircleDot size={16} />
+			<span class="tool-label">Fill</span>
+		</button>
+		<button
+			class="tool-btn font-ui"
+			onclick={handleCleanSmall}
+			title="Remove small objects (<50px)"
+			disabled={!selectedImage || operationPending}
+		>
+			<Eraser size={16} />
+			<span class="tool-label">Clean</span>
+		</button>
+
+		<div class="tool-separator"></div>
+
 		<button
 			class="tool-btn font-ui"
 			onclick={() => showMasks = !showMasks}
@@ -105,7 +252,6 @@
 			{:else}
 				<EyeOff size={16} />
 			{/if}
-			<span class="tool-label">Masks</span>
 		</button>
 
 		{#if showMasks}
@@ -122,7 +268,6 @@
 
 		<button class="tool-btn font-ui" onclick={handleLaunchNapari} title="Open in Napari" disabled={!selectedImage}>
 			<ExternalLink size={16} />
-			<span class="tool-label">Napari</span>
 		</button>
 
 		{#if maskStats}
@@ -221,11 +366,12 @@
 	.editor-toolbar {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 8px 16px;
+		gap: 4px;
+		padding: 6px 12px;
 		background: var(--bg-elevated);
 		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
+		flex-wrap: wrap;
 	}
 
 	.tool-group {
@@ -236,13 +382,13 @@
 	.tool-btn {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 6px 10px;
+		gap: 4px;
+		padding: 5px 8px;
 		background: transparent;
 		border: 1px solid transparent;
 		border-radius: var(--radius-sm);
 		color: var(--text-muted);
-		font-size: 12px;
+		font-size: 11px;
 		cursor: pointer;
 		transition: all var(--transition-fast);
 	}
@@ -271,11 +417,11 @@
 		width: 1px;
 		height: 24px;
 		background: var(--border);
-		margin: 0 6px;
+		margin: 0 4px;
 	}
 
 	.opacity-slider {
-		width: 80px;
+		width: 60px;
 		accent-color: var(--accent);
 	}
 
