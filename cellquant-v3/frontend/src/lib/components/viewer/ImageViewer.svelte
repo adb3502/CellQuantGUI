@@ -1,10 +1,10 @@
 <script lang="ts">
 	/**
 	 * OpenLayers tiled image viewer using DZI tiles from the backend.
-	 * Supports multi-channel compositing and mask overlay.
+	 * Renders microscopy images as a zoomable tile pyramid.
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { tileUrlTemplate } from '$api/client';
+	import { tileUrl } from '$api/client';
 
 	let {
 		sessionId,
@@ -33,43 +33,58 @@
 		const { default: Map } = await import('ol/Map');
 		const { default: View } = await import('ol/View');
 		const { default: TileLayer } = await import('ol/layer/Tile');
-		const { default: XYZ } = await import('ol/source/XYZ');
+		const { default: TileGrid } = await import('ol/tilegrid/TileGrid');
+		const { default: Projection } = await import('ol/proj/Projection');
+		const { default: TileImage } = await import('ol/source/TileImage');
 		const { getCenter } = await import('ol/extent');
 
+		const tileSize = 256;
 		const maxLevel = Math.ceil(Math.log2(Math.max(width, height)));
-		const extent = [0, 0, width, height];
+		const extent: [number, number, number, number] = [0, 0, width, height];
 
-		// Build resolutions array (one per zoom level)
-		const resolutions = [];
+		const projection = new Projection({
+			code: 'cellquant-image',
+			units: 'pixels',
+			extent,
+		});
+
+		// Resolutions: level 0 = most zoomed out, maxLevel = full resolution
+		const resolutions: number[] = [];
 		for (let i = 0; i <= maxLevel; i++) {
 			resolutions.push(Math.pow(2, maxLevel - i));
 		}
 
-		const urlTemplate = tileUrlTemplate(sessionId, condition, baseName, channel);
+		const tileGrid = new TileGrid({
+			extent,
+			resolutions,
+			tileSize,
+		});
 
-		const source = new XYZ({
-			url: urlTemplate,
-			tileSize: 256,
-			maxZoom: maxLevel,
-			minZoom: 0,
-			wrapX: false
+		const source = new TileImage({
+			projection,
+			tileGrid,
+			tileUrlFunction(tileCoord: number[]) {
+				const z = tileCoord[0];
+				const col = tileCoord[1];
+				const row = -(tileCoord[2] + 1);
+				if (row < 0 || col < 0) return '';
+				return tileUrl(sessionId, condition, baseName, channel, z, col, row);
+			},
 		});
 
 		map = new Map({
 			target: container,
-			layers: [
-				new TileLayer({ source })
-			],
+			layers: [new TileLayer({ source })],
 			view: new View({
+				projection,
 				center: getCenter(extent),
 				resolutions,
 				extent,
-				constrainOnlyCenter: true
-			})
+				constrainOnlyCenter: true,
+			}),
 		});
 
 		map.getView().fit(extent, { padding: [10, 10, 10, 10] });
-
 		if (onMapReady) onMapReady(map);
 	});
 
@@ -91,7 +106,6 @@
 		overflow: hidden;
 	}
 
-	/* OpenLayers canvas styling */
 	.image-viewer :global(.ol-viewport) {
 		border-radius: var(--radius-md);
 	}

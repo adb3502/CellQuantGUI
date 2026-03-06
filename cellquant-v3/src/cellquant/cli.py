@@ -84,7 +84,8 @@ def _run_server(args):
         factory=True,
         host=args.host,
         port=args.port,
-        reload=False,
+        reload=True,
+        reload_dirs=[str(Path(__file__).resolve().parent)],
     )
 
 

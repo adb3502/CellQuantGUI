@@ -4,13 +4,15 @@
 	 * Adds an RGBA mask tile layer to an existing OL map.
 	 */
 	import { onDestroy } from 'svelte';
-	import { maskTileUrlTemplate } from '$api/client';
+	import { maskTileUrl } from '$api/client';
 
 	let {
 		map = null,
 		sessionId,
 		condition,
 		baseName,
+		width = 2048,
+		height = 2048,
 		visible = true,
 		opacity = 0.5,
 		refreshKey = 0
@@ -19,6 +21,8 @@
 		sessionId: string;
 		condition: string;
 		baseName: string;
+		width?: number;
+		height?: number;
 		visible?: boolean;
 		opacity?: number;
 		refreshKey?: number;
@@ -34,19 +38,36 @@
 
 		(async () => {
 			const { default: TileLayer } = await import('ol/layer/Tile');
-			const { default: XYZ } = await import('ol/source/XYZ');
+			const { default: TileImage } = await import('ol/source/TileImage');
+			const { default: TileGrid } = await import('ol/tilegrid/TileGrid');
 
-			const url = maskTileUrlTemplate(sessionId, condition, baseName);
+			const extent = [0, 0, width, height];
+			const maxLevel = Math.ceil(Math.log2(Math.max(width, height)));
+			const resolutions: number[] = [];
+			for (let i = 0; i <= maxLevel; i++) {
+				resolutions.push(Math.pow(2, maxLevel - i));
+			}
+
+			const tileGrid = new TileGrid({
+				extent,
+				resolutions,
+				tileSize: 256,
+			});
 
 			if (layer) {
 				map.removeLayer(layer);
 			}
 
 			layer = new TileLayer({
-				source: new XYZ({
-					url,
-					tileSize: 256,
-					wrapX: false
+				source: new TileImage({
+					tileGrid,
+					tileUrlFunction(tileCoord: number[]) {
+						const z = tileCoord[0];
+						const col = tileCoord[1];
+						const row = -(tileCoord[2] + 1);
+						if (row < 0 || col < 0) return '';
+						return maskTileUrl(sessionId, condition, baseName, z, col, row);
+					},
 				}),
 				opacity,
 				visible

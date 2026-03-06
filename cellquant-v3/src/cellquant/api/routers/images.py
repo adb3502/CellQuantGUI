@@ -37,6 +37,18 @@ async def render_preview(
     size=0: full native resolution, lossless.
     color: optional hex color for false-color LUT rendering.
     """
+    return await _render_preview_impl(session_id, condition, base_name, channel, size, color)
+
+
+async def _render_preview_impl(
+    session_id: str,
+    condition: str,
+    base_name: str,
+    channel: str,
+    size: int = 800,
+    color: str | None = None,
+):
+    """Internal render implementation (safe to call directly)."""
     session = get_session(session_id)
     src = _resolve_image_path(session, condition, base_name, channel)
 
@@ -69,6 +81,9 @@ async def get_tile(
     row: int,
 ):
     """Serve a DZI tile. Generates on demand if not cached."""
+    # OpenLayers may send negative y coords; convert to positive row index
+    if row < 0:
+        row = -(row + 1)
     session = get_session(session_id)
     tile_dir = session.get_tile_dir(condition, base_name, channel)
     tile_path = tile_dir / str(level) / f"{col}_{row}.png"
@@ -102,6 +117,43 @@ async def get_image_metadata(
     }
 
 
+@router.get("/{session_id}/{condition}/{base_name}/{channel}/raw")
+async def get_raw_tiff(session_id: str, condition: str, base_name: str, channel: str):
+    """Serve the original TIFF file for ImageJ.JS embedding."""
+    session = get_session(session_id)
+    src = _resolve_image_path(session, condition, base_name, channel)
+    return FileResponse(src, media_type="image/tiff", headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.get("/{session_id}/{condition}/{base_name}/{channel}/png")
+async def get_png(session_id: str, condition: str, base_name: str, channel: str):
+    """Serve image as 8-bit PNG with auto-contrast for ImageJ.JS."""
+    import io
+    from fastapi.responses import StreamingResponse
+    from cellquant.core.io.image_loader import load_image
+    from cellquant.tiles.thumbnail import imagej_auto_contrast
+    from PIL import Image
+
+    session = get_session(session_id)
+    src = _resolve_image_path(session, condition, base_name, channel)
+
+    cache_dir = session.directory / "renders" / condition / base_name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{channel}_full.png"
+
+    if not cache_path.exists():
+        img = load_image(src)
+        img_8bit = imagej_auto_contrast(img)
+        pil_img = Image.fromarray(img_8bit)
+        pil_img.save(cache_path, "PNG")
+
+    return FileResponse(
+        cache_path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 # Keep legacy thumbnail routes for backward compatibility
 @router.get("/{session_id}/{condition}/{base_name}/thumbnail")
 async def get_thumbnail(session_id: str, condition: str, base_name: str):
@@ -112,4 +164,4 @@ async def get_thumbnail(session_id: str, condition: str, base_name: str):
     if not channels_data:
         raise HTTPException(404, "Image set not found")
     first_channel = next(iter(channels_data.keys()))
-    return await render_preview(session_id, condition, base_name, first_channel, size=512)
+    return await _render_preview_impl(session_id, condition, base_name, first_channel, size=512)

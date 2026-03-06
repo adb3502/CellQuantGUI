@@ -76,6 +76,39 @@ async def get_results_page(session_id: str, page: int = 0, per_page: int = 1000)
     )
 
 
+@router.get("/chart-data/{session_id}")
+async def get_chart_data(session_id: str):
+    """Return lightweight data for charts — all rows but only chart-relevant columns."""
+    session = get_session(session_id)
+
+    if session.results_df is None:
+        session.load_results()
+
+    if session.results_df is None or len(session.results_df) == 0:
+        return {"columns": [], "data": [], "total_rows": 0}
+
+    df = session.results_df
+
+    # Select only columns needed for charts
+    keep = []
+    for col in df.columns:
+        if col in ("Condition", "ImageSet", "CellID", "Area",
+                    "x_centroid", "y_centroid"):
+            keep.append(col)
+        elif col.endswith("_CTCF"):
+            keep.append(col)
+        elif col.startswith("is_outlier_") or col in ("is_saturated", "is_dim"):
+            keep.append(col)
+
+    chart_df = df[keep] if keep else df
+
+    return {
+        "columns": list(chart_df.columns),
+        "data": chart_df.to_dict(orient="records"),
+        "total_rows": len(chart_df),
+    }
+
+
 @router.get("/summary/{session_id}", response_model=SummaryStatsResponse)
 async def get_summary(session_id: str):
     """Get summary statistics."""

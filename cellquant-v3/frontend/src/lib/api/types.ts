@@ -53,6 +53,8 @@ export interface ChannelRole {
 	useForSegmentation: boolean;
 	quantify: boolean;
 	isMitochondrial: boolean;
+	isNuclearQuant: boolean;   // quantify nuclear channel (for nuclear intensity)
+	isCytoQuant: boolean;      // quantify cyto-only region (whole cell - nuclear)
 	excluded: boolean;
 }
 
@@ -76,6 +78,7 @@ export interface SegmentationParams {
 	batch_size: number;
 	skip_existing?: boolean;
 	custom_model_path?: string | null;
+	segmentation_suffixes?: string[] | null;
 }
 
 export interface SegmentationStatus {

@@ -4,11 +4,14 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
+	optimizeDeps: {
+		include: ['imjoy-core']
+	},
 	server: {
 		port: 5173,
 		proxy: {
 			'/api': {
-				target: 'http://localhost:8002',
+				target: 'http://localhost:8005',
 				changeOrigin: true,
 				ws: true
 			}

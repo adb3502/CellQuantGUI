@@ -1,8 +1,9 @@
 """Mask viewing and editing endpoints."""
 
+import io
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse, StreamingResponse
 
 from cellquant.api.dependencies import get_session
 from cellquant.api.schemas.masks import (
@@ -52,6 +53,71 @@ async def get_mask_stats(session_id: str, condition: str, base_name: str):
     )
 
 
+@router.get("/{session_id}/{condition}/{base_name}/tiff")
+async def get_mask_tiff(session_id: str, condition: str, base_name: str):
+    """Serve the mask as a 16-bit TIFF for ImageJ.JS."""
+    import numpy as np
+    from PIL import Image
+
+    session = get_session(session_id)
+    masks = _get_masks(session, condition, base_name)
+
+    # Convert to 16-bit for ImageJ compatibility
+    mask_16 = masks.astype(np.uint16)
+    pil_img = Image.fromarray(mask_16)
+
+    buf = io.BytesIO()
+    pil_img.save(buf, format="TIFF")
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="image/tiff",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/{session_id}/{condition}/{base_name}/png")
+async def get_mask_png(session_id: str, condition: str, base_name: str):
+    """Serve the mask as a 16-bit PNG for ImageJ.JS."""
+    import numpy as np
+    from PIL import Image
+
+    session = get_session(session_id)
+    masks = _get_masks(session, condition, base_name)
+
+    mask_16 = masks.astype(np.uint16)
+    pil_img = Image.fromarray(mask_16)
+
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.put("/{session_id}/{condition}/{base_name}/tiff")
+async def put_mask_tiff(session_id: str, condition: str, base_name: str, request: Request):
+    """Upload an edited mask TIFF from ImageJ.JS."""
+    import numpy as np
+    from PIL import Image
+
+    session = get_session(session_id)
+    body = await request.body()
+    buf = io.BytesIO(body)
+    pil_img = Image.open(buf)
+    new_masks = np.array(pil_img).astype(np.int32)
+
+    _save_masks(session, condition, base_name, new_masks, "imagej_edit")
+
+    n_cells = len(np.unique(new_masks)) - 1
+    return {"success": True, "n_cells": n_cells}
+
+
 @router.get("/{session_id}/{condition}/{base_name}/render")
 async def render_mask_overlay(
     session_id: str,
@@ -59,9 +125,13 @@ async def render_mask_overlay(
     base_name: str,
     size: int = Query(default=800, ge=100, le=4096),
     style: str = Query(default="filled", pattern="^(filled|outline)$"),
-    bg: str = Query(default="composite", pattern="^(composite|cyto)$"),
+    bg: str = Query(default=""),
 ):
-    """Render mask overlay on a background image."""
+    """Render mask overlay on a background image.
+
+    bg: channel suffix to use as background (e.g. 'C0', 'C1', 'C2').
+         If empty, uses the first available channel.
+    """
     import numpy as np
     from PIL import Image
     from cellquant.tiles.thumbnail import imagej_auto_contrast
@@ -79,25 +149,27 @@ async def render_mask_overlay(
     if not channels:
         raise HTTPException(404, f"No channels found: {condition}/{base_name}")
 
+    # Sanitize bg for cache key
+    bg_key = bg if bg else "default"
     cache_dir = session.directory / "renders" / condition / base_name
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"mask_{style}_{bg}_{size}.jpg"
+    cache_path = cache_dir / f"mask_{style}_{bg_key}_{size}.jpg"
 
     if not cache_path.exists():
-        if bg == "cyto":
-            cyto_suffix = cond_data.get("cyto_suffix", "C1")
-            cyto_path = channels.get(cyto_suffix) or channels.get(cyto_suffix.upper())
-            if not cyto_path or not Path(cyto_path).exists():
-                raise HTTPException(404, f"Cyto channel not found: {condition}/{base_name}")
-            bg_img = load_image(cyto_path)
+        if bg:
+            # Load a specific channel by suffix
+            ch_path = channels.get(bg) or channels.get(bg.upper()) or channels.get(bg.lower())
+            if not ch_path or not Path(ch_path).exists():
+                raise HTTPException(404, f"Channel '{bg}' not found: {condition}/{base_name}")
+            bg_img = load_image(ch_path)
         else:
-            loaded = []
+            # Fallback: first available channel
             for suffix, ch_path in channels.items():
                 if ch_path and Path(ch_path).exists():
-                    loaded.append(load_image(ch_path).astype(np.float64))
-            if not loaded:
+                    bg_img = load_image(ch_path)
+                    break
+            else:
                 raise HTTPException(404, f"No channel images found: {condition}/{base_name}")
-            bg_img = loaded[0] if len(loaded) == 1 else np.sum(np.stack(loaded, axis=0), axis=0)
 
         bg_uint8 = imagej_auto_contrast(bg_img)
 
@@ -122,6 +194,9 @@ async def get_mask_tile(
     session_id: str, condition: str, base_name: str, level: int, col: int, row: int
 ):
     """Serve a mask overlay tile (RGBA PNG)."""
+    # OpenLayers may send negative y coords; convert to positive row index
+    if row < 0:
+        row = -(row + 1)
     session = get_session(session_id)
     tile_dir = session.get_tile_dir(condition, base_name, "_mask")
     tile_path = tile_dir / str(level) / f"{col}_{row}.png"

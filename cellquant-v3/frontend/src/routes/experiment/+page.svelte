@@ -5,6 +5,7 @@
 		Palette
 	} from 'lucide-svelte';
 	import { browseFolder, scanExperiment, configureChannels, setOutputPath, renderUrl } from '$api/client';
+	import FolderPicker from '$components/ui/FolderPicker.svelte';
 	import type { ChannelRole, ConditionInfo } from '$api/types';
 	import { DEFAULT_CHANNEL_COLORS } from '$api/types';
 	import { sessionId } from '$stores/session';
@@ -23,6 +24,8 @@
 	let browsing = $state(false);
 	let browsingOutput = $state(false);
 	let error = $state('');
+	let folderPickerOpen = $state(false);
+	let folderPickerTarget = $state<'experiment' | 'output'>('experiment');
 
 	// Expandable conditions
 	let expandedConditions = $state<Set<string>>(new Set());
@@ -140,12 +143,16 @@
 			if (path) {
 				folderPath = path;
 				await handleScan();
+				browsing = false;
+				return;
 			}
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Browse failed';
-		} finally {
-			browsing = false;
+		} catch {
+			// Native dialog failed
 		}
+		browsing = false;
+		// Fall back to web-based folder picker
+		folderPickerTarget = 'experiment';
+		folderPickerOpen = true;
 	}
 
 	async function handleBrowseOutput() {
@@ -155,15 +162,26 @@
 			if (path) {
 				outPath = path;
 				$outputPath = path;
-				// Move session data to new output directory
-				if ($sessionId) {
-					await setOutputPath($sessionId, path);
-				}
+				if ($sessionId) await setOutputPath($sessionId, path);
+				browsingOutput = false;
+				return;
 			}
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Browse failed';
-		} finally {
-			browsingOutput = false;
+		} catch {
+			// Native dialog failed
+		}
+		browsingOutput = false;
+		folderPickerTarget = 'output';
+		folderPickerOpen = true;
+	}
+
+	async function handleFolderPicked(path: string) {
+		if (folderPickerTarget === 'experiment') {
+			folderPath = path;
+			await handleScan();
+		} else {
+			outPath = path;
+			$outputPath = path;
+			if ($sessionId) await setOutputPath($sessionId, path);
 		}
 	}
 
@@ -232,9 +250,11 @@
 
 					return {
 						suffix, role, name, color,
-						useForSegmentation: role === 'nuclear' || role === 'whole_cell',
+						useForSegmentation: role === 'whole_cell',
 						quantify: role === 'marker',
 						isMitochondrial: false,
+						isNuclearQuant: role === 'nuclear',
+						isCytoQuant: role === 'whole_cell',
 						excluded: false
 					};
 				});
@@ -312,9 +332,32 @@
 		}
 	});
 
+	let channelWarnings = $state<string[]>([]);
+
 	async function saveChannelConfig() {
 		// Persist to store
 		$channelRoles = [...channels];
+
+		// Validation warnings
+		const warnings: string[] = [];
+		const hasMitoMarker = channels.some(c => c.isMitochondrial && !c.excluded);
+		const hasNuclearChannel = channels.some(c => c.role === 'nuclear' && !c.excluded);
+		const hasNucQuant = channels.some(c => c.isNuclearQuant && !c.excluded);
+		const hasCytoQuant = channels.some(c => c.isCytoQuant && !c.excluded);
+
+		if (hasMitoMarker && !hasNuclearChannel) {
+			warnings.push('Mitochondrial correction requires a nuclear channel — nuclear signal subtraction will be skipped');
+		}
+		if (hasNucQuant && !hasNuclearChannel) {
+			warnings.push('Nuclear quantification enabled but no nuclear channel is available');
+		}
+		if (hasCytoQuant && !hasNuclearChannel) {
+			warnings.push('Cytoplasm-only quantification requires a nuclear channel to subtract — will use whole cell instead');
+		}
+		channelWarnings = warnings;
+		if (warnings.length > 0) {
+			warnings.forEach(w => addLog('config', `Warning: ${w}`));
+		}
 
 		if (!$sessionId) return;
 		const nucSuffix = channels.find((c) => c.role === 'nuclear')?.suffix;
@@ -445,6 +488,8 @@
 									<th class="font-ui" title="Use for Cellpose segmentation">Seg</th>
 									<th class="font-ui" title="Include in quantification">Quant</th>
 									<th class="font-ui" title="Mitochondrial marker (subtract nuclear)">Mito</th>
+									<th class="font-ui" title="Quantify nuclear region">Nuc</th>
+									<th class="font-ui" title="Quantify cytoplasm region (whole cell minus nuclear)">Cyto</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -485,10 +530,23 @@
 											<input type="checkbox" bind:checked={channels[i].isMitochondrial}
 												disabled={ch.role !== 'marker'} onchange={saveChannelConfig} />
 										</td>
+									<td class="td-check">
+											<input type="checkbox" bind:checked={channels[i].isNuclearQuant} onchange={saveChannelConfig} />
+										</td>
+										<td class="td-check">
+											<input type="checkbox" bind:checked={channels[i].isCytoQuant} onchange={saveChannelConfig} />
+										</td>
 									</tr>
 								{/each}
 							</tbody>
 						</table>
+					{#if channelWarnings.length > 0}
+							<div class="channel-warnings">
+								{#each channelWarnings as warn}
+									<p class="channel-warn font-ui">{warn}</p>
+								{/each}
+							</div>
+						{/if}
 					</section>
 				{/if}
 
@@ -602,6 +660,12 @@
 		</div>
 	</div>
 </div>
+
+<FolderPicker
+	bind:open={folderPickerOpen}
+	title={folderPickerTarget === 'experiment' ? 'Select Experiment Folder' : 'Select Output Directory'}
+	onSelect={handleFolderPicked}
+/>
 
 <style>
 	.page-experiment {
@@ -915,6 +979,23 @@
 	}
 	.ch-excluded {
 		opacity: 0.35;
+	}
+
+	.channel-warnings {
+		margin-top: 8px;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.channel-warn {
+		font-size: 11px;
+		color: #e8a830;
+		margin: 0;
+		padding: 6px 10px;
+		background: rgba(232, 168, 48, 0.08);
+		border-left: 3px solid #e8a830;
+		border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 	}
 	.td-color {
 		width: 36px;

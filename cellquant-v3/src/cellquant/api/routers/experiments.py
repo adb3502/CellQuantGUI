@@ -1,5 +1,6 @@
 """Experiment scanning and condition management."""
 
+import asyncio
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -70,29 +71,88 @@ router = APIRouter(prefix="/experiments", tags=["experiments"])
 
 @router.post("/browse")
 async def browse_folder() -> dict:
-    """Open a native OS folder picker dialog and return the selected path."""
+    """Open a native OS folder picker dialog and return the selected path.
+
+    Falls back gracefully if no display is available (remote access).
+    """
     result: dict = {"path": None}
 
     def _open_dialog():
-        import tkinter as tk
-        from tkinter import filedialog
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
 
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = filedialog.askdirectory(title="Select Experiment Folder")
-        root.destroy()
-        if path:
-            result["path"] = path
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            root.focus_force()
+            path = filedialog.askdirectory(title="Select Experiment Folder")
+            root.destroy()
+            if path:
+                result["path"] = path
+        except Exception:
+            # No display available (remote user) — return None so frontend
+            # can fall back to the web-based folder picker
+            result["path"] = None
 
-    # tkinter must run on a dedicated thread (not asyncio event loop)
-    t = threading.Thread(target=_open_dialog)
-    t.start()
-    t.join()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _open_dialog)
 
     if not result["path"]:
         return {"path": None}
     return {"path": result["path"]}
+
+
+@router.post("/list-dir")
+async def list_directory(req: dict) -> dict:
+    """List subdirectories and drives for the web-based folder picker.
+
+    Body: { "path": "C:/some/folder" }  — omit or null for drive roots.
+    """
+    import platform
+
+    raw_path = req.get("path")
+
+    # No path → list drive roots (Windows) or filesystem root (Unix)
+    if not raw_path:
+        if platform.system() == "Windows":
+            import string
+            drives = []
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:\\"
+                if Path(drive).exists():
+                    drives.append({"name": f"{letter}:", "path": drive, "is_dir": True})
+            return {"path": "", "parent": None, "entries": drives}
+        else:
+            raw_path = "/"
+
+    p = Path(raw_path)
+    if not p.exists():
+        raise HTTPException(400, f"Path does not exist: {raw_path}")
+    if not p.is_dir():
+        raise HTTPException(400, f"Not a directory: {raw_path}")
+
+    entries = []
+    try:
+        for child in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if child.name.startswith("."):
+                continue
+            if child.is_dir():
+                entries.append({
+                    "name": child.name,
+                    "path": str(child).replace("\\", "/"),
+                    "is_dir": True,
+                })
+    except PermissionError:
+        pass  # skip inaccessible dirs
+
+    parent = str(p.parent).replace("\\", "/") if p.parent != p else None
+
+    return {
+        "path": str(p).replace("\\", "/"),
+        "parent": parent,
+        "entries": entries,
+    }
 
 
 @router.post("/scan", response_model=ScanResponse)

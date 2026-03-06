@@ -25,7 +25,10 @@ def run_segmentation_task(
     from PIL import Image
     import numpy as np
 
-    params = SegmentationParams(**seg_params)
+    # Filter to only fields that SegmentationParams accepts
+    import dataclasses
+    _param_fields = {f.name for f in dataclasses.fields(SegmentationParams)}
+    params = SegmentationParams(**{k: v for k, v in seg_params.items() if k in _param_fields})
     custom_model_path = seg_params.get("custom_model_path")
     print(f"[CellQuant] Initializing Cellpose engine: model={params.model_type}, gpu={params.use_gpu}, batch={params.batch_size}")
     engine = CellposeEngine(
@@ -35,6 +38,12 @@ def run_segmentation_task(
         custom_model_path=custom_model_path,
     )
     print(f"[CellQuant] Engine created, loading model...")
+
+    # Clear cached renders so previews use fresh channel config
+    import shutil
+    renders_dir = session.directory / "renders"
+    if renders_dir.exists():
+        shutil.rmtree(renders_dir, ignore_errors=True)
 
     total_images = sum(
         len(cond.get("image_sets", {})) for cond in session.conditions.values()
@@ -50,6 +59,16 @@ def run_segmentation_task(
         image_sets = cond_data.get("image_sets", {})
         nuclear_suffix = cond_data.get("nuclear_suffix", "C0")
         cyto_suffix = cond_data.get("cyto_suffix", "C1")
+
+        # Apply per-condition overrides if any
+        cond_overrides = seg_params.get("condition_overrides", {}).get(cond_name, {})
+        cond_diameter = cond_overrides.get("diameter", params.diameter)
+        cond_flow = cond_overrides.get("flow_threshold", params.flow_threshold)
+        cond_cellprob = cond_overrides.get("cellprob_threshold", params.cellprob_threshold)
+        cond_min_size = cond_overrides.get("min_size", params.min_size)
+
+        # User-selected segmentation channels (per-condition or global)
+        seg_suffixes = cond_overrides.get("segmentation_suffixes") or seg_params.get("segmentation_suffixes")
 
         for base_name, channels in image_sets.items():
             if task.status == "cancelled":
@@ -83,28 +102,44 @@ def run_segmentation_task(
                 message=f"Segmenting {cond_name}/{base_name}",
             )
 
-            nuc_path = channels.get(nuclear_suffix) or channels.get(nuclear_suffix.upper())
-            if not nuc_path:
-                processed += 1
-                continue
-
-            nuc_img = load_image(nuc_path)
-            nuc_norm = normalize_image(nuc_img)
-
-            cyto_path = channels.get(cyto_suffix) or channels.get(cyto_suffix.upper())
-            if cyto_path:
-                cyto_img = load_image(cyto_path)
-                cyto_norm = normalize_image(cyto_img)
-                seg_input = np.stack([nuc_norm, cyto_norm], axis=0)
+            # Build segmentation input from user-selected channels (or default nuclear+cyto)
+            if seg_suffixes:
+                # Use exactly the channels the user selected for segmentation
+                loaded_channels = []
+                for suffix in seg_suffixes:
+                    ch_path = channels.get(suffix) or channels.get(suffix.upper()) or channels.get(suffix.lower())
+                    if ch_path:
+                        img = load_image(ch_path)
+                        loaded_channels.append(normalize_image(img))
+                if not loaded_channels:
+                    print(f"[CellQuant] Skipping {cond_name}/{base_name} (no matching channels for {seg_suffixes})")
+                    processed += 1
+                    continue
+                if len(loaded_channels) == 1:
+                    seg_input = loaded_channels[0]
+                else:
+                    seg_input = np.stack(loaded_channels, axis=0)
             else:
-                seg_input = nuc_norm
+                # Default: cyto/brightfield channel only
+                cyto_path = channels.get(cyto_suffix) or channels.get(cyto_suffix.upper())
+                if cyto_path:
+                    cyto_img = load_image(cyto_path)
+                    seg_input = normalize_image(cyto_img)
+                else:
+                    # Fallback to nuclear if no cyto available
+                    nuc_path = channels.get(nuclear_suffix) or channels.get(nuclear_suffix.upper())
+                    if not nuc_path:
+                        processed += 1
+                        continue
+                    nuc_img = load_image(nuc_path)
+                    seg_input = normalize_image(nuc_img)
 
             print(f"[CellQuant] Segmenting {cond_name}/{base_name} ...")
             result = engine.segment_single(
                 seg_input,
-                diameter=params.diameter,
-                flow_threshold=params.flow_threshold,
-                min_size=params.min_size,
+                diameter=cond_diameter,
+                flow_threshold=cond_flow,
+                min_size=cond_min_size,
                 channels=params.channels,
             )
 

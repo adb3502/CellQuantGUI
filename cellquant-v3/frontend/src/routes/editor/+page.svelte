@@ -1,61 +1,43 @@
 <script lang="ts">
 	import {
-		PenTool, Trash2, Merge, MousePointer, Eye, EyeOff,
-		ExternalLink, Undo2, Pencil, Droplets, Expand, Shrink,
-		Sparkles, CircleDot, Eraser
+		PenTool, Eye, EyeOff, ExternalLink, Undo2,
+		Expand, Shrink, Sparkles, CircleDot, Eraser, Save
 	} from 'lucide-svelte';
 	import { sessionId } from '$stores/session';
 	import { conditions, selectedCondition } from '$stores/experiment';
 	import {
-		getImageMetadata, getMaskStats, launchNapari,
+		getMaskStats, launchNapari,
 		undoMaskEdit, dilateCells, erodeCells, smoothMasks,
 		fillHoles, cleanSmall
 	} from '$api/client';
-	import ImageViewer from '$components/viewer/ImageViewer.svelte';
-	import MaskOverlay from '$components/viewer/MaskOverlay.svelte';
-	import MaskEditor from '$components/viewer/MaskEditor.svelte';
+	import ImageJViewer from '$components/viewer/ImageJViewer.svelte';
 	import ThumbnailGrid from '$components/viewer/ThumbnailGrid.svelte';
 
-	type EditorTool = 'select' | 'delete' | 'merge' | 'draw' | 'flood';
-
-	let activeTool = $state<EditorTool>('select');
 	let showMasks = $state(true);
-	let maskOpacity = $state(0.5);
-	let selectedCells = $state<number[]>([]);
 	let selectedImage = $state<string | null>(null);
-	let olMap = $state<any>(null);
-	let imgWidth = $state(0);
-	let imgHeight = $state(0);
-	let maskRefreshKey = $state(0);
 	let maskStats = $state<{ n_cells: number } | null>(null);
 	let operationPending = $state(false);
+	let ijViewer = $state<any>(null);
 
-	const tools: { id: EditorTool; label: string; icon: any }[] = [
-		{ id: 'select', label: 'Select', icon: MousePointer },
-		{ id: 'delete', label: 'Delete', icon: Trash2 },
-		{ id: 'merge', label: 'Merge', icon: Merge },
-		{ id: 'draw', label: 'Draw', icon: Pencil },
-		{ id: 'flood', label: 'Fill', icon: Droplets }
-	];
-
+	let currentCondition = $derived($conditions.find((c) => c.name === $selectedCondition));
 	let currentImages = $derived(
-		$conditions.find((c) => c.name === $selectedCondition)?.image_sets.map((s) => s.base_name) ?? []
+		currentCondition?.image_sets.map((s) => s.base_name) ?? []
 	);
+
+	function getFirstChannel(baseName: string): string {
+		const imgSet = currentCondition?.image_sets.find((s) => s.base_name === baseName);
+		if (imgSet && Object.keys(imgSet.channels).length > 0) {
+			return Object.keys(imgSet.channels)[0];
+		}
+		return 'w1';
+	}
+
+	let selectedChannel = $state('w1');
 
 	async function handleImageSelect(baseName: string) {
 		if (!$sessionId || !$selectedCondition) return;
 		selectedImage = baseName;
-		selectedCells = [];
-
-		try {
-			const meta = await getImageMetadata($sessionId, $selectedCondition, baseName, 'default');
-			imgWidth = meta.width;
-			imgHeight = meta.height;
-		} catch {
-			imgWidth = 2048;
-			imgHeight = 2048;
-		}
-
+		selectedChannel = getFirstChannel(baseName);
 		loadMaskStats();
 	}
 
@@ -68,12 +50,7 @@
 		}
 	}
 
-	function handleMapReady(map: any) {
-		olMap = map;
-	}
-
 	function handleMaskChanged() {
-		maskRefreshKey++;
 		loadMaskStats();
 	}
 
@@ -82,43 +59,35 @@
 		try {
 			await undoMaskEdit($sessionId, $selectedCondition, selectedImage);
 			handleMaskChanged();
-		} catch {
-			// Nothing to undo
-		}
+		} catch { /* Nothing to undo */ }
 	}
 
 	async function handleDilate() {
-		if (!$sessionId || !$selectedCondition || !selectedImage || selectedCells.length === 0) return;
+		if (!$sessionId || !$selectedCondition || !selectedImage) return;
 		operationPending = true;
 		try {
-			await dilateCells($sessionId, $selectedCondition, selectedImage, selectedCells, 1);
+			// Dilate all cells (no selection in ImageJ mode)
+			await dilateCells($sessionId, $selectedCondition, selectedImage, [], 1);
 			handleMaskChanged();
-		} finally {
-			operationPending = false;
-		}
+		} finally { operationPending = false; }
 	}
 
 	async function handleErode() {
-		if (!$sessionId || !$selectedCondition || !selectedImage || selectedCells.length === 0) return;
+		if (!$sessionId || !$selectedCondition || !selectedImage) return;
 		operationPending = true;
 		try {
-			await erodeCells($sessionId, $selectedCondition, selectedImage, selectedCells, 1);
+			await erodeCells($sessionId, $selectedCondition, selectedImage, [], 1);
 			handleMaskChanged();
-		} finally {
-			operationPending = false;
-		}
+		} finally { operationPending = false; }
 	}
 
 	async function handleSmooth() {
 		if (!$sessionId || !$selectedCondition || !selectedImage) return;
 		operationPending = true;
 		try {
-			const ids = selectedCells.length > 0 ? selectedCells : undefined;
-			await smoothMasks($sessionId, $selectedCondition, selectedImage, ids);
+			await smoothMasks($sessionId, $selectedCondition, selectedImage);
 			handleMaskChanged();
-		} finally {
-			operationPending = false;
-		}
+		} finally { operationPending = false; }
 	}
 
 	async function handleFillHoles() {
@@ -127,9 +96,7 @@
 		try {
 			await fillHoles($sessionId, $selectedCondition, selectedImage);
 			handleMaskChanged();
-		} finally {
-			operationPending = false;
-		}
+		} finally { operationPending = false; }
 	}
 
 	async function handleCleanSmall() {
@@ -138,18 +105,12 @@
 		try {
 			await cleanSmall($sessionId, $selectedCondition, selectedImage, 50);
 			handleMaskChanged();
-		} finally {
-			operationPending = false;
-		}
+		} finally { operationPending = false; }
 	}
 
 	async function handleLaunchNapari() {
 		if (!$sessionId || !$selectedCondition || !selectedImage) return;
-		try {
-			await launchNapari($sessionId, $selectedCondition, selectedImage);
-		} catch {
-			// Napari may not be available
-		}
+		try { await launchNapari($sessionId, $selectedCondition, selectedImage); } catch {}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -165,121 +126,42 @@
 <div class="page-editor">
 	<!-- Toolbar -->
 	<div class="editor-toolbar">
-		<div class="tool-group">
-			{#each tools as tool}
-				<button
-					class="tool-btn font-ui"
-					class:active={activeTool === tool.id}
-					onclick={() => activeTool = tool.id}
-					title={tool.label}
-				>
-					<tool.icon size={16} />
-					<span class="tool-label">{tool.label}</span>
-				</button>
-			{/each}
-		</div>
-
-		<div class="tool-separator"></div>
-
 		<!-- Undo -->
-		<button
-			class="tool-btn font-ui"
-			onclick={handleUndo}
-			title="Undo (Ctrl+Z)"
-			disabled={!selectedImage}
-		>
+		<button class="tool-btn font-ui" onclick={handleUndo} title="Undo (Ctrl+Z)" disabled={!selectedImage}>
 			<Undo2 size={16} />
 		</button>
 
 		<div class="tool-separator"></div>
 
 		<!-- Batch operations -->
-		<button
-			class="tool-btn font-ui"
-			onclick={handleDilate}
-			title="Dilate selected"
-			disabled={selectedCells.length === 0 || operationPending}
-		>
-			<Expand size={16} />
-			<span class="tool-label">Dilate</span>
+		<button class="tool-btn font-ui" onclick={handleDilate} title="Dilate all cells" disabled={!selectedImage || operationPending}>
+			<Expand size={16} /> <span class="tool-label">Dilate</span>
 		</button>
-		<button
-			class="tool-btn font-ui"
-			onclick={handleErode}
-			title="Erode selected"
-			disabled={selectedCells.length === 0 || operationPending}
-		>
-			<Shrink size={16} />
-			<span class="tool-label">Erode</span>
+		<button class="tool-btn font-ui" onclick={handleErode} title="Erode all cells" disabled={!selectedImage || operationPending}>
+			<Shrink size={16} /> <span class="tool-label">Erode</span>
 		</button>
-		<button
-			class="tool-btn font-ui"
-			onclick={handleSmooth}
-			title="Smooth boundaries"
-			disabled={!selectedImage || operationPending}
-		>
-			<Sparkles size={16} />
-			<span class="tool-label">Smooth</span>
+		<button class="tool-btn font-ui" onclick={handleSmooth} title="Smooth boundaries" disabled={!selectedImage || operationPending}>
+			<Sparkles size={16} /> <span class="tool-label">Smooth</span>
 		</button>
-		<button
-			class="tool-btn font-ui"
-			onclick={handleFillHoles}
-			title="Fill holes in cells"
-			disabled={!selectedImage || operationPending}
-		>
-			<CircleDot size={16} />
-			<span class="tool-label">Fill</span>
+		<button class="tool-btn font-ui" onclick={handleFillHoles} title="Fill holes in cells" disabled={!selectedImage || operationPending}>
+			<CircleDot size={16} /> <span class="tool-label">Fill</span>
 		</button>
-		<button
-			class="tool-btn font-ui"
-			onclick={handleCleanSmall}
-			title="Remove small objects (<50px)"
-			disabled={!selectedImage || operationPending}
-		>
-			<Eraser size={16} />
-			<span class="tool-label">Clean</span>
+		<button class="tool-btn font-ui" onclick={handleCleanSmall} title="Remove small objects" disabled={!selectedImage || operationPending}>
+			<Eraser size={16} /> <span class="tool-label">Clean</span>
 		</button>
 
 		<div class="tool-separator"></div>
 
-		<button
-			class="tool-btn font-ui"
-			onclick={() => showMasks = !showMasks}
-			title={showMasks ? 'Hide masks' : 'Show masks'}
-		>
-			{#if showMasks}
-				<Eye size={16} />
-			{:else}
-				<EyeOff size={16} />
-			{/if}
+		<button class="tool-btn font-ui" onclick={() => showMasks = !showMasks} title={showMasks ? 'Hide masks' : 'Show masks'}>
+			{#if showMasks}<Eye size={16} />{:else}<EyeOff size={16} />{/if}
 		</button>
-
-		{#if showMasks}
-			<input
-				type="range"
-				min="0"
-				max="1"
-				step="0.05"
-				bind:value={maskOpacity}
-				class="opacity-slider"
-				title="Mask opacity"
-			/>
-		{/if}
 
 		<button class="tool-btn font-ui" onclick={handleLaunchNapari} title="Open in Napari" disabled={!selectedImage}>
 			<ExternalLink size={16} />
 		</button>
 
 		{#if maskStats}
-			<div class="mask-info font-mono">
-				{maskStats.n_cells} cells
-			</div>
-		{/if}
-
-		{#if selectedCells.length > 0}
-			<div class="selection-info font-mono">
-				{selectedCells.length} selected
-			</div>
+			<div class="mask-info font-mono">{maskStats.n_cells} cells</div>
 		{/if}
 	</div>
 
@@ -312,42 +194,23 @@
 			{/if}
 		</div>
 
-		<!-- Viewer -->
+		<!-- ImageJ.JS Viewer -->
 		<div class="editor-viewer">
-			{#if selectedImage && $sessionId && $selectedCondition && imgWidth > 0}
-				<ImageViewer
+			{#if selectedImage && $sessionId && $selectedCondition}
+				<ImageJViewer
+					bind:this={ijViewer}
 					sessionId={$sessionId}
 					condition={$selectedCondition}
 					baseName={selectedImage}
-					width={imgWidth}
-					height={imgHeight}
-					onMapReady={handleMapReady}
+					channel={selectedChannel}
+					{showMasks}
+					onMaskChanged={handleMaskChanged}
 				/>
-				{#if olMap}
-					<MaskOverlay
-						map={olMap}
-						sessionId={$sessionId}
-						condition={$selectedCondition}
-						baseName={selectedImage}
-						visible={showMasks}
-						opacity={maskOpacity}
-						refreshKey={maskRefreshKey}
-					/>
-					<MaskEditor
-						map={olMap}
-						sessionId={$sessionId}
-						condition={$selectedCondition}
-						baseName={selectedImage}
-						{activeTool}
-						bind:selectedCells
-						onMaskChanged={handleMaskChanged}
-					/>
-				{/if}
 			{:else}
 				<div class="placeholder font-ui">
 					<PenTool size={48} strokeWidth={1} />
 					<p>Select a condition and image to begin editing</p>
-					<p class="hint">Click cells to select, use toolbar to edit</p>
+					<p class="hint">ImageJ.JS provides full editing tools: ROI, brush, wand, etc.</p>
 				</div>
 			{/if}
 		</div>
@@ -358,9 +221,9 @@
 	.page-editor {
 		display: flex;
 		flex-direction: column;
-		height: calc(100vh - var(--header-height) - 48px);
+		height: calc(100vh - var(--header-height) - 28px);
 		gap: 0;
-		margin: -24px;
+		margin: -14px -16px -14px -12px;
 	}
 
 	.editor-toolbar {
@@ -372,11 +235,6 @@
 		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
 		flex-wrap: wrap;
-	}
-
-	.tool-group {
-		display: flex;
-		gap: 2px;
 	}
 
 	.tool-btn {
@@ -393,25 +251,9 @@
 		transition: all var(--transition-fast);
 	}
 
-	.tool-btn:hover {
-		color: var(--text);
-		background: var(--bg-hover);
-	}
-
-	.tool-btn.active {
-		color: var(--accent);
-		background: var(--accent-soft);
-		border-color: var(--accent);
-	}
-
-	.tool-btn:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-
-	.tool-label {
-		font-weight: 500;
-	}
+	.tool-btn:hover { color: var(--text); background: var(--bg-hover); }
+	.tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.tool-label { font-weight: 500; }
 
 	.tool-separator {
 		width: 1px;
@@ -420,24 +262,11 @@
 		margin: 0 4px;
 	}
 
-	.opacity-slider {
-		width: 60px;
-		accent-color: var(--accent);
-	}
-
 	.mask-info {
 		font-size: 11px;
 		color: var(--text-muted);
 		margin-left: auto;
 		padding: 4px 8px;
-	}
-
-	.selection-info {
-		font-size: 11px;
-		color: var(--accent);
-		padding: 4px 10px;
-		background: var(--accent-soft);
-		border-radius: var(--radius-pill);
 	}
 
 	.editor-content {
@@ -453,11 +282,10 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
+		flex-shrink: 0;
 	}
 
-	.sidebar-section {
-		padding: 12px;
-	}
+	.sidebar-section { padding: 12px; }
 
 	.sidebar-label {
 		display: block;
@@ -479,10 +307,7 @@
 		font-size: 12px;
 	}
 
-	.sidebar-select:focus {
-		border-color: var(--accent);
-		outline: none;
-	}
+	.sidebar-select:focus { border-color: var(--accent); outline: none; }
 
 	.thumbnail-section {
 		flex: 1;
@@ -511,13 +336,6 @@
 		color: var(--text-faint);
 	}
 
-	.placeholder p {
-		margin-top: 12px;
-		font-size: 13px;
-	}
-
-	.placeholder .hint {
-		font-size: 11px;
-		margin-top: 4px;
-	}
+	.placeholder p { margin-top: 12px; font-size: 13px; }
+	.placeholder .hint { font-size: 11px; margin-top: 4px; }
 </style>

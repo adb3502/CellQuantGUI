@@ -1,7 +1,16 @@
 """Pydantic schemas for segmentation endpoints."""
 
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+
+class ConditionOverride(BaseModel):
+    """Per-condition parameter overrides."""
+    diameter: Optional[float] = None
+    flow_threshold: Optional[float] = None
+    cellprob_threshold: Optional[float] = None
+    min_size: Optional[int] = None
+    segmentation_suffixes: Optional[List[str]] = None
 
 
 class SegmentationRequest(BaseModel):
@@ -16,6 +25,8 @@ class SegmentationRequest(BaseModel):
     batch_size: int = 4
     skip_existing: bool = False
     custom_model_path: Optional[str] = None
+    segmentation_suffixes: Optional[List[str]] = None
+    condition_overrides: Optional[Dict[str, ConditionOverride]] = None
 
 
 class SegmentationStatusResponse(BaseModel):

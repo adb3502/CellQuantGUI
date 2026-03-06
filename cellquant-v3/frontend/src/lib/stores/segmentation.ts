@@ -12,6 +12,18 @@ export const segParams = writable<SegmentationParams>({
 	batch_size: 4
 });
 
+/** Per-condition parameter overrides. Keys are condition names.
+ *  Only non-null fields override the global defaults. */
+export interface ConditionSegOverride {
+	diameter?: number | null;
+	flow_threshold?: number;
+	cellprob_threshold?: number;
+	min_size?: number;
+	segmentation_suffixes?: string[] | null;
+}
+
+export const conditionOverrides = writable<Record<string, ConditionSegOverride>>({});
+
 export const segStatus = writable<SegmentationStatus | null>(null);
 export const segTaskId = writable<string | null>(null);
 

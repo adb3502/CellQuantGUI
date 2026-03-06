@@ -1,46 +1,110 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { BarChart3, FileSpreadsheet, FileText, AlertTriangle } from 'lucide-svelte';
-	import { getResultsPage, getResultsSummary, getQCSummary, exportCsv, exportExcel } from '$api/client';
+	import { BarChart3, FileSpreadsheet, FileText, AlertTriangle, Grid3x3 } from 'lucide-svelte';
+	import { getResultsPage, getResultsSummary, getQCSummary, getChartData, exportCsv, exportExcel } from '$api/client';
 	import { sessionId } from '$stores/session';
 	import { resultsPage, quantSummary, qcSummary } from '$stores/quantification';
+	import ChartCard from '$components/charts/ChartCard.svelte';
+	import {
+		COLOR_PALETTES, type PaletteId, getColor,
+		getChartTheme, baseLayout, computeKDE, removeOutliersIQR,
+		CLEAN_CONFIG, INTERACTIVE_CONFIG, VIRIDIS,
+	} from '$components/charts/chart-theme';
 
-	type TabId = 'table' | 'boxplot' | 'scatter' | 'histogram' | 'spatial' | 'qcsummary' | 'perfov';
+	type TabId = 'table' | 'distribution' | 'scatter' | 'spatial' | 'qcsummary' | 'perfov';
 	let activeTab = $state<TabId>('table');
 	let loading = $state(false);
 	let showFlagged = $state(true);
+	let selectedCtcfCol = $state('');
 
-	let columns = $derived($resultsPage?.columns ?? []);
-	let rows = $derived($resultsPage?.data ?? []);
+	// Chart options
+	type DistType = 'violin' | 'box' | 'density';
+	let distType = $state<DistType>('violin');
+	let palette = $state<PaletteId>('default');
+	let showOutliers = $state(false);
+	let showPoints = $state(false);
+	let showGrid = $state(false);
+	let logScale = $state(false);
+	let excludeZeros = $state(false);
+
+	// Table (paginated)
+	let tableColumns = $derived($resultsPage?.columns ?? []);
+	let tableRows = $derived($resultsPage?.data ?? []);
 	let currentPage = $derived($resultsPage?.page ?? 0);
 	let totalPages = $derived($resultsPage?.total_pages ?? 0);
 	let totalRows = $derived($resultsPage?.total_rows ?? 0);
 
-	// Detect quality flag columns
-	let flagColumns = $derived(columns.filter(c =>
+	// Chart data (all rows, lightweight columns)
+	let chartData = $state<{ columns: string[]; data: Record<string, unknown>[]; total_rows: number } | null>(null);
+	let chartColumns = $derived(chartData?.columns ?? []);
+	let chartRows = $derived(chartData?.data ?? []);
+
+	// CTCF column options (from chart data which has all rows)
+	let ctcfColumns = $derived(chartColumns.filter(c => c.endsWith('_CTCF')));
+	let activeCtcfCol = $derived(selectedCtcfCol && ctcfColumns.includes(selectedCtcfCol)
+		? selectedCtcfCol
+		: ctcfColumns[0] || 'CTCF');
+
+	// Fallback: use table columns if chart data not loaded yet
+	let ctcfColumnsFromTable = $derived(tableColumns.filter(c => c.endsWith('_CTCF')));
+	let effectiveCtcfColumns = $derived(ctcfColumns.length > 0 ? ctcfColumns : ctcfColumnsFromTable);
+
+	// Detect quality flag columns (table view)
+	let flagColumns = $derived(tableColumns.filter(c =>
 		c.startsWith('is_outlier_') || c === 'is_saturated' || c === 'is_dim' || c === 'low_confidence_background'
 	));
-	let hasFlaggedRows = $derived(rows.some(r =>
+	let hasFlaggedRows = $derived(tableRows.some(r =>
 		flagColumns.some(c => r[c] === true)
 	));
 
 	const tabs: { id: TabId; label: string }[] = [
 		{ id: 'table', label: 'Data Table' },
-		{ id: 'boxplot', label: 'Box Plot' },
+		{ id: 'distribution', label: 'Distribution' },
 		{ id: 'scatter', label: 'Scatter' },
-		{ id: 'histogram', label: 'Histogram' },
 		{ id: 'spatial', label: 'Spatial Map' },
 		{ id: 'qcsummary', label: 'QC Summary' },
-		{ id: 'perfov', label: 'Per-FOV' }
+		{ id: 'perfov', label: 'Per-FOV' },
 	];
 
 	// QC Summary data
 	let summaryRows = $derived($qcSummary?.summary ?? []);
 	let fovRows = $derived($qcSummary?.fov_data ?? []);
 
+	// Top scrollbar sync
+	let topScrollEl: HTMLDivElement | undefined = $state();
+	let topScrollInner: HTMLDivElement | undefined = $state();
+	let tableContainerEl: HTMLDivElement | undefined = $state();
+	let tableEl: HTMLTableElement | undefined = $state();
+	let syncing = false;
+
+	$effect(() => {
+		if (tableEl && topScrollInner && tableRows.length > 0) {
+			requestAnimationFrame(() => {
+				if (tableEl && topScrollInner) {
+					topScrollInner.style.width = tableEl.scrollWidth + 'px';
+				}
+			});
+		}
+	});
+
+	function syncScrollFromTop() {
+		if (syncing || !topScrollEl || !tableContainerEl) return;
+		syncing = true;
+		tableContainerEl.scrollLeft = topScrollEl.scrollLeft;
+		syncing = false;
+	}
+
+	function syncScrollFromTable() {
+		if (syncing || !topScrollEl || !tableContainerEl) return;
+		syncing = true;
+		topScrollEl.scrollLeft = tableContainerEl.scrollLeft;
+		syncing = false;
+	}
+
 	onMount(() => {
-		if ($sessionId && !$resultsPage) {
-			loadPage(0);
+		if ($sessionId) {
+			if (!$resultsPage) loadPage(0);
+			if (!chartData) loadChartData();
 			loadSummary();
 			loadQCSummary();
 		}
@@ -57,22 +121,23 @@
 		loading = false;
 	}
 
+	let chartLoading = $state(false);
+
+	async function loadChartData() {
+		if (!$sessionId) return;
+		chartLoading = true;
+		try { chartData = await getChartData($sessionId); } catch {}
+		chartLoading = false;
+	}
+
 	async function loadSummary() {
 		if (!$sessionId) return;
-		try {
-			$quantSummary = await getResultsSummary($sessionId);
-		} catch {
-			// No results yet
-		}
+		try { $quantSummary = await getResultsSummary($sessionId); } catch {}
 	}
 
 	async function loadQCSummary() {
 		if (!$sessionId) return;
-		try {
-			$qcSummary = await getQCSummary($sessionId);
-		} catch {
-			// No results yet
-		}
+		try { $qcSummary = await getQCSummary($sessionId); } catch {}
 	}
 
 	function formatValue(val: unknown): string {
@@ -93,127 +158,244 @@
 		return col.startsWith('is_outlier_') || col === 'is_saturated' || col === 'is_dim';
 	}
 
+	// ── Chart rendering ──────────────────────────────────
+
 	async function renderChart(tab: string) {
-		if (!$resultsPage || rows.length === 0) return;
+		if (chartRows.length === 0) return;
 
 		const Plotly = await import('plotly.js-dist-min');
-		const themeColors = getComputedStyle(document.documentElement);
-		const accent = themeColors.getPropertyValue('--accent').trim();
-		const bg = themeColors.getPropertyValue('--bg-elevated').trim();
-		const text = themeColors.getPropertyValue('--text').trim();
-		const border = themeColors.getPropertyValue('--border').trim();
+		const theme = getChartTheme();
+		const layout = baseLayout(theme);
+		layout.xaxis = { ...(layout.xaxis as object), showgrid: showGrid };
+		layout.yaxis = { ...(layout.yaxis as object), showgrid: showGrid };
 
-		const layout: Partial<Plotly.Layout> = {
-			paper_bgcolor: bg,
-			plot_bgcolor: bg,
-			font: { color: text, size: 11 },
-			margin: { t: 40, r: 30, b: 50, l: 60 },
-			xaxis: { gridcolor: border },
-			yaxis: { gridcolor: border }
-		};
+		const allRows = chartRows;
+		const allCols = chartColumns;
+		const ctcfCol = activeCtcfCol;
+		const condCol = allCols.includes('Condition') ? 'Condition' : allCols[0];
+		const conditions = [...new Set(allRows.map((r) => String(r[condCol])))];
 
-		const ctcfCols = columns.filter((c) => c.endsWith('_CTCF'));
-		const ctcfCol = ctcfCols[0] || 'CTCF';
-
-		if (tab === 'boxplot') {
-			const condCol = columns.includes('Condition') ? 'Condition' : columns[0];
-			const conditions = [...new Set(rows.map((r) => String(r[condCol])))];
-			const traces = conditions.map((cond) => ({
-				y: rows.filter((r) => String(r[condCol]) === cond).map((r) => Number(r[ctcfCol]) || 0),
-				type: 'box' as const,
-				name: cond,
-				marker: { color: accent }
-			}));
-			Plotly.newPlot('plotly-boxplot', traces, { ...layout, title: 'CTCF by Condition' });
+		if (tab === 'distribution') {
+			renderDistribution(Plotly, layout, theme, ctcfCol, condCol, conditions);
 		} else if (tab === 'scatter') {
-			const trace = {
-				x: rows.map((r) => Number(r['Area']) || 0),
-				y: rows.map((r) => Number(r[ctcfCol]) || 0),
-				mode: 'markers' as const,
-				type: 'scatter' as const,
-				marker: { color: accent, size: 4, opacity: 0.6 }
-			};
-			Plotly.newPlot('plotly-scatter', [trace], {
-				...layout,
-				title: 'Area vs CTCF',
-				xaxis: { ...layout.xaxis, title: 'Area (px)' },
-				yaxis: { ...layout.yaxis, title: ctcfCol }
-			});
-		} else if (tab === 'histogram') {
-			const trace = {
-				x: rows.map((r) => Number(r[ctcfCol]) || 0),
-				type: 'histogram' as const,
-				marker: { color: accent }
-			};
-			Plotly.newPlot('plotly-histogram', [trace], {
-				...layout,
-				title: `${ctcfCol} Distribution`,
-				xaxis: { ...layout.xaxis, title: ctcfCol },
-				yaxis: { ...layout.yaxis, title: 'Count' }
-			});
+			renderScatter(Plotly, layout, theme, ctcfCol, condCol, conditions);
 		} else if (tab === 'spatial') {
-			const hasXY = columns.includes('x_centroid') && columns.includes('y_centroid');
-			if (!hasXY) return;
-
-			const ctcfValues = rows.map(r => Number(r[ctcfCol]) || 0);
-			const trace = {
-				x: rows.map((r) => Number(r['x_centroid']) || 0),
-				y: rows.map((r) => Number(r['y_centroid']) || 0),
-				mode: 'markers' as const,
-				type: 'scatter' as const,
-				marker: {
-					color: ctcfValues,
-					colorscale: 'Viridis',
-					size: 5,
-					opacity: 0.8,
-					colorbar: { title: ctcfCol, titlefont: { size: 11 } }
-				},
-				text: rows.map((r, i) => `Cell ${r['CellID']}<br>${ctcfCol}: ${ctcfValues[i].toFixed(1)}`),
-				hoverinfo: 'text' as const,
-			};
-			Plotly.newPlot('plotly-spatial', [trace], {
-				...layout,
-				title: 'Spatial CTCF Map',
-				xaxis: { ...layout.xaxis, title: 'X (px)', scaleanchor: 'y' },
-				yaxis: { ...layout.yaxis, title: 'Y (px)', autorange: 'reversed' as const }
-			});
+			renderSpatial(Plotly, layout, theme, ctcfCol);
 		} else if (tab === 'perfov') {
-			if (fovRows.length === 0) return;
-
-			// Find median CTCF columns in FOV data
-			const medCols = Object.keys(fovRows[0] || {}).filter(k => k.endsWith('_median_CTCF'));
-			const medCol = medCols[0];
-			if (!medCol) return;
-
-			const conditions = [...new Set(fovRows.map(r => String(r['Condition'])))];
-			const traces = conditions.map(cond => ({
-				y: fovRows.filter(r => String(r['Condition']) === cond).map(r => Number(r[medCol]) || 0),
-				type: 'box' as const,
-				name: cond,
-				marker: { color: accent },
-				boxpoints: 'all' as const,
-				jitter: 0.3,
-				pointpos: -1.5,
-			}));
-			Plotly.newPlot('plotly-perfov', traces, {
-				...layout,
-				title: 'Per-FOV Median CTCF',
-				yaxis: { ...layout.yaxis, title: medCol }
-			});
+			renderPerFov(Plotly, layout, theme);
 		}
 	}
 
-	$effect(() => {
-		if (activeTab !== 'table' && activeTab !== 'qcsummary' && rows.length > 0) {
-			setTimeout(() => renderChart(activeTab), 50);
-		}
-	});
+	function renderDistribution(Plotly: any, layout: any, theme: any, ctcfCol: string, condCol: string, conditions: string[]) {
+		const traces: any[] = [];
+		const yLabel = logScale
+			? (distType === 'density' ? 'Density' : `log₁₀(${ctcfCol} + 1)`)
+			: (distType === 'density' ? 'Density' : ctcfCol);
 
-	// Compute outlier count from summary
-	let outlierCount = $derived.by(() => {
-		if (!$quantSummary) return 0;
-		// Check if wsResult has outliers_flagged from the task
-		return 0;
+		conditions.forEach((cond, i) => {
+			let vals = chartRows.filter((r) => String(r[condCol]) === cond).map((r) => Number(r[ctcfCol]) || 0);
+			if (!showOutliers) {
+				vals = removeOutliersIQR(vals).filtered;
+			}
+			if (excludeZeros) {
+				vals = vals.filter(v => v > 0);
+			}
+			// Log transform: log10(x + 1) — safe for zero values
+			if (logScale && distType !== 'density') {
+				vals = vals.map(v => Math.log10(Math.max(0, v) + 1));
+			}
+			const color = getColor(i, palette);
+
+			if (distType === 'violin') {
+				traces.push({
+					type: 'violin',
+					name: cond,
+					x: vals.map(() => cond),
+					y: vals,
+					width: 0.6,
+					scalegroup: cond,
+					spanmode: 'soft',
+					box: { visible: true },
+					meanline: { visible: true },
+					points: showPoints ? 'all' : false,
+					marker: { color, size: 3, opacity: 0.6 },
+					line: { color, width: 1.5 },
+					fillcolor: color + '33',
+					hovertemplate: `<b>${cond}</b><br>%{y:.1f}<extra></extra>`,
+				});
+			} else if (distType === 'box') {
+				traces.push({
+					type: 'box',
+					name: cond,
+					x: vals.map(() => cond),
+					y: vals,
+					width: 0.5,
+					boxpoints: showPoints ? 'all' : 'outliers',
+					jitter: 0.4,
+					pointpos: 0,
+					marker: { color, size: 3, opacity: 0.6 },
+					line: { color, width: 1.5 },
+					fillcolor: color + '33',
+					hovertemplate: `<b>${cond}</b><br>%{y:.1f}<extra></extra>`,
+				});
+			} else if (distType === 'density') {
+				// For density, apply log to raw values before KDE
+				const kdeVals = logScale ? vals.map(v => Math.log10(Math.max(0, v) + 1)) : vals;
+				const kde = computeKDE(kdeVals);
+				if (kde.x.length > 0) {
+					traces.push({
+						type: 'scatter',
+						mode: 'lines',
+						name: cond,
+						x: kde.x,
+						y: kde.y,
+						fill: 'tozeroy',
+						line: { color, width: 2 },
+						fillcolor: color + '22',
+						hovertemplate: `<b>${cond}</b><br>${logScale ? 'log₁₀(' + ctcfCol + '+1)' : ctcfCol}: %{x:.1f}<br>Density: %{y:.4f}<extra></extra>`,
+					});
+				}
+			}
+		});
+
+		const distLayout = {
+			...layout,
+			margin: { l: 60, r: 20, t: 20, b: 80 },
+			yaxis: {
+				...(layout.yaxis as object),
+				title: { text: yLabel, font: { size: 12, color: theme.textMuted } },
+				rangemode: (distType !== 'density' && !logScale) ? 'nonnegative' as const : undefined,
+			},
+			xaxis: {
+				...(layout.xaxis as object),
+				title: distType === 'density'
+					? { text: logScale ? `log₁₀(${ctcfCol} + 1)` : ctcfCol, font: { size: 12, color: theme.textMuted } }
+					: '',
+			},
+			violingap: 0.35,
+			violingroupgap: 0.15,
+			boxgap: 0.3,
+			boxgroupgap: 0.15,
+		};
+
+		Plotly.newPlot('plotly-distribution', traces, distLayout, CLEAN_CONFIG);
+	}
+
+	function renderScatter(Plotly: any, layout: any, theme: any, ctcfCol: string, condCol: string, conditions: string[]) {
+		const traces = conditions.map((cond, i) => {
+			const condRows = chartRows.filter((r) => String(r[condCol]) === cond);
+			const color = getColor(i, palette);
+			return {
+				x: condRows.map((r) => Number(r['Area']) || 0),
+				y: condRows.map((r) => Number(r[ctcfCol]) || 0),
+				mode: 'markers',
+				type: 'scattergl',
+				name: cond,
+				marker: {
+					color: color + '80',
+					size: 4,
+					line: { color, width: 0.5 },
+				},
+				hovertemplate: `<b>${cond}</b><br>Area: %{x:.0f} px<br>${ctcfCol}: %{y:.1f}<extra></extra>`,
+			};
+		});
+
+		Plotly.newPlot('plotly-scatter', traces, {
+			...layout,
+			margin: { l: 60, r: 20, t: 20, b: 80 },
+			xaxis: { ...(layout.xaxis as object), title: { text: 'Area (px)', font: { size: 12, color: theme.textMuted } } },
+			yaxis: { ...(layout.yaxis as object), title: { text: ctcfCol, font: { size: 12, color: theme.textMuted } }, rangemode: 'nonnegative' },
+		}, INTERACTIVE_CONFIG);
+	}
+
+	function renderSpatial(Plotly: any, layout: any, theme: any, ctcfCol: string) {
+		const hasXY = chartColumns.includes('x_centroid') && chartColumns.includes('y_centroid');
+		if (!hasXY) return;
+
+		const ctcfValues = chartRows.map(r => Number(r[ctcfCol]) || 0);
+		const trace = {
+			x: chartRows.map((r) => Number(r['x_centroid']) || 0),
+			y: chartRows.map((r) => Number(r['y_centroid']) || 0),
+			mode: 'markers',
+			type: 'scattergl',
+			marker: {
+				color: ctcfValues,
+				colorscale: VIRIDIS,
+				size: 4,
+				opacity: 0.85,
+				colorbar: {
+					title: { text: ctcfCol, font: { size: 11, color: theme.textMuted } },
+					thickness: 14,
+					len: 0.6,
+					tickfont: { size: 10, color: theme.textMuted },
+					outlinewidth: 0,
+				},
+			},
+			text: chartRows.map((r) => `Cell ${r['CellID']}`),
+			hovertemplate: `<b>%{text}</b><br>x: %{x:.0f}, y: %{y:.0f}<br>${ctcfCol}: %{marker.color:.1f}<extra></extra>`,
+			showlegend: false,
+		};
+
+		Plotly.newPlot('plotly-spatial', [trace], {
+			...layout,
+			margin: { l: 60, r: 20, t: 20, b: 60 },
+			xaxis: { ...(layout.xaxis as object), title: { text: 'X (px)', font: { size: 12, color: theme.textMuted } }, scaleanchor: 'y' },
+			yaxis: { ...(layout.yaxis as object), title: { text: 'Y (px)', font: { size: 12, color: theme.textMuted } }, autorange: 'reversed' },
+			showlegend: false,
+		}, INTERACTIVE_CONFIG);
+	}
+
+	function renderPerFov(Plotly: any, layout: any, theme: any) {
+		if (fovRows.length === 0) return;
+
+		const medCols = Object.keys(fovRows[0] || {}).filter(k => k.endsWith('_median_CTCF'));
+		const medCol = medCols[0];
+		if (!medCol) return;
+
+		const fovConditions = [...new Set(fovRows.map(r => String(r['Condition'])))];
+		const traces = fovConditions.map((cond, i) => {
+			const vals = fovRows.filter(r => String(r['Condition']) === cond).map(r => Number(r[medCol]) || 0);
+			const color = getColor(i, palette);
+			return {
+				type: 'box',
+				name: cond,
+				x: vals.map(() => cond),
+				y: vals,
+				width: 0.5,
+				marker: { color, size: 6, opacity: 0.7 },
+				line: { color, width: 1.5 },
+				fillcolor: color + '30',
+				boxpoints: 'all',
+				jitter: 0.4,
+				pointpos: 0,
+				hovertemplate: `<b>${cond}</b><br>Median CTCF: %{y:.1f}<extra></extra>`,
+			};
+		});
+
+		Plotly.newPlot('plotly-perfov', traces, {
+			...layout,
+			margin: { l: 60, r: 20, t: 20, b: 80 },
+			yaxis: { ...(layout.yaxis as object), title: { text: medCol.replace('_median_CTCF', ' Median CTCF'), font: { size: 12, color: theme.textMuted } } },
+			boxgap: 0.3,
+			boxgroupgap: 0.15,
+		}, CLEAN_CONFIG);
+	}
+
+	// Re-render when tab, data, options, or marker changes
+	$effect(() => {
+		const _tab = activeTab;
+		const _col = activeCtcfCol;
+		const _len = chartRows.length;
+		const _dist = distType;
+		const _pal = palette;
+		const _out = showOutliers;
+		const _pts = showPoints;
+		const _grid = showGrid;
+		const _log = logScale;
+		const _zeros = excludeZeros;
+		if (_tab !== 'table' && _tab !== 'qcsummary' && _len > 0) {
+			setTimeout(() => renderChart(_tab), 50);
+		}
 	});
 </script>
 
@@ -240,30 +422,85 @@
 		</div>
 	{/if}
 
-	<!-- Export Bar -->
-	<div class="export-bar">
-		<span class="export-label font-ui">Export:</span>
-		<button class="export-btn font-ui" onclick={() => $sessionId && exportCsv($sessionId)}>
-			<FileText size={14} />
-			CSV
-		</button>
-		<button class="export-btn font-ui" onclick={() => $sessionId && exportExcel($sessionId)}>
-			<FileSpreadsheet size={14} />
-			Excel
-		</button>
-
-		{#if hasFlaggedRows}
-			<label class="toggle-flagged font-ui">
-				<input type="checkbox" bind:checked={showFlagged} />
-				Show flagged rows
-			</label>
-		{/if}
-
-		{#if totalRows > 0}
-			<button class="export-btn refresh-btn font-ui" onclick={() => { loadPage(0); loadSummary(); loadQCSummary(); }}>
-				Refresh
+	<!-- Toolbar -->
+	<div class="toolbar">
+		<div class="toolbar-left">
+			<span class="toolbar-label font-ui">Export:</span>
+			<button class="toolbar-btn font-ui" onclick={() => $sessionId && exportCsv($sessionId)}>
+				<FileText size={14} /> CSV
 			</button>
-		{/if}
+			<button class="toolbar-btn font-ui" onclick={() => $sessionId && exportExcel($sessionId)}>
+				<FileSpreadsheet size={14} /> Excel
+			</button>
+
+			{#if effectiveCtcfColumns.length > 1}
+				<span class="toolbar-sep"></span>
+				<select class="toolbar-select font-ui" bind:value={selectedCtcfCol}>
+					{#each effectiveCtcfColumns as col}
+						<option value={col}>{col.replace('_CTCF', '')}</option>
+					{/each}
+				</select>
+			{/if}
+
+			{#if hasFlaggedRows && activeTab === 'table'}
+				<span class="toolbar-sep"></span>
+				<label class="toolbar-check font-ui">
+					<input type="checkbox" bind:checked={showFlagged} />
+					Show flagged
+				</label>
+			{/if}
+		</div>
+
+		<div class="toolbar-right">
+			{#if activeTab !== 'table' && activeTab !== 'qcsummary'}
+				<select class="toolbar-select palette-select font-ui" bind:value={palette}>
+					{#each Object.entries(COLOR_PALETTES) as [id, p]}
+						<option value={id}>
+							{p.label}
+						</option>
+					{/each}
+				</select>
+
+				<label class="toolbar-check font-ui" title="Show grid lines">
+					<input type="checkbox" bind:checked={showGrid} />
+					<Grid3x3 size={13} />
+				</label>
+			{/if}
+
+			{#if activeTab === 'distribution'}
+				<span class="toolbar-sep"></span>
+				<div class="chart-type-toggle">
+					<button class="toggle-btn font-ui" class:active={distType === 'violin'} onclick={() => distType = 'violin'}>Violin</button>
+					<button class="toggle-btn font-ui" class:active={distType === 'box'} onclick={() => distType = 'box'}>Box</button>
+					<button class="toggle-btn font-ui" class:active={distType === 'density'} onclick={() => distType = 'density'}>Density</button>
+				</div>
+				<span class="toolbar-sep"></span>
+				<label class="toolbar-check font-ui">
+					<input type="checkbox" bind:checked={showOutliers} />
+					Outliers
+				</label>
+				{#if distType !== 'density'}
+					<label class="toolbar-check font-ui">
+						<input type="checkbox" bind:checked={showPoints} />
+						Points
+					</label>
+				{/if}
+				<label class="toolbar-check font-ui" title="Exclude cells with CTCF = 0">
+					<input type="checkbox" bind:checked={excludeZeros} />
+					No zeros
+				</label>
+				<label class="toolbar-check font-ui" title="Log₁₀(x+1) transform">
+					<input type="checkbox" bind:checked={logScale} />
+					Log
+				</label>
+			{/if}
+
+			{#if totalRows > 0}
+				<button class="toolbar-btn font-ui" onclick={() => { loadPage(0); loadChartData(); loadSummary(); loadQCSummary(); }}>
+					Refresh
+				</button>
+			{/if}
+		</div>
 	</div>
 
 	<!-- Tab Navigation -->
@@ -282,25 +519,25 @@
 	<!-- Tab Content -->
 	<section class="results-content">
 		{#if activeTab === 'table'}
-			<div class="table-container">
-				{#if rows.length > 0}
-					<table class="results-table">
+			<div class="table-scroll-top" bind:this={topScrollEl} onscroll={syncScrollFromTop}>
+				<div class="table-scroll-top-inner" bind:this={topScrollInner}></div>
+			</div>
+			<div class="table-container" bind:this={tableContainerEl} onscroll={syncScrollFromTable}>
+				{#if tableRows.length > 0}
+					<table class="results-table" bind:this={tableEl}>
 						<thead>
 							<tr>
-								{#each columns as col}
+								{#each tableColumns as col}
 									<th class="font-ui" class:flag-col={isFlagColumn(col)}>{col}</th>
 								{/each}
 							</tr>
 						</thead>
 						<tbody>
-							{#each rows as row}
+							{#each tableRows as row}
 								{#if showFlagged || !isFlaggedRow(row)}
 									<tr class:flagged-row={isFlaggedRow(row)}>
-										{#each columns as col}
-											<td
-												class="font-mono"
-												class:flag-cell={isFlagColumn(col) && row[col] === true}
-											>
+										{#each tableColumns as col}
+											<td class="font-mono" class:flag-cell={isFlagColumn(col) && row[col] === true}>
 												{formatValue(row[col])}
 											</td>
 										{/each}
@@ -309,26 +546,10 @@
 							{/each}
 						</tbody>
 					</table>
-
-					<!-- Pagination -->
 					<div class="pagination">
-						<button
-							class="page-btn font-ui"
-							disabled={currentPage <= 0 || loading}
-							onclick={() => loadPage(currentPage - 1)}
-						>
-							Previous
-						</button>
-						<span class="page-info font-mono">
-							Page {currentPage + 1} of {totalPages}
-						</span>
-						<button
-							class="page-btn font-ui"
-							disabled={currentPage >= totalPages - 1 || loading}
-							onclick={() => loadPage(currentPage + 1)}
-						>
-							Next
-						</button>
+						<button class="page-btn font-ui" disabled={currentPage <= 0 || loading} onclick={() => loadPage(currentPage - 1)}>Previous</button>
+						<span class="page-info font-mono">Page {currentPage + 1} of {totalPages}</span>
+						<button class="page-btn font-ui" disabled={currentPage >= totalPages - 1 || loading} onclick={() => loadPage(currentPage + 1)}>Next</button>
 					</div>
 				{:else}
 					<div class="placeholder font-ui">
@@ -337,47 +558,46 @@
 					</div>
 				{/if}
 			</div>
-		{:else if activeTab === 'boxplot'}
-			<div class="chart-container" id="plotly-boxplot">
-				{#if rows.length === 0}
-					<div class="placeholder font-ui">
-						<BarChart3 size={48} strokeWidth={1} />
-						<p>CTCF distribution by condition</p>
-					</div>
-				{/if}
-			</div>
+
+		{:else if activeTab === 'distribution'}
+			<ChartCard
+				title="{activeCtcfCol} by Condition"
+				subtitle="{distType === 'violin' ? 'Violin' : distType === 'box' ? 'Box' : 'Density'} plot{logScale ? ' · log₁₀(x+1)' : ''}{excludeZeros ? ' · zeros excluded' : ''}{!showOutliers ? ' · outliers removed (IQR ×1.5)' : ''}"
+				loading={chartLoading}
+			empty={chartRows.length === 0 && !chartLoading}
+				emptyMessage="Run quantification to see distributions"
+			>
+				{#snippet children()}
+					<div class="chart-plot" id="plotly-distribution"></div>
+				{/snippet}
+			</ChartCard>
+
 		{:else if activeTab === 'scatter'}
-			<div class="chart-container" id="plotly-scatter">
-				{#if rows.length === 0}
-					<div class="placeholder font-ui">
-						<BarChart3 size={48} strokeWidth={1} />
-						<p>Area vs CTCF scatter plot</p>
-					</div>
-				{/if}
-			</div>
-		{:else if activeTab === 'histogram'}
-			<div class="chart-container" id="plotly-histogram">
-				{#if rows.length === 0}
-					<div class="placeholder font-ui">
-						<BarChart3 size={48} strokeWidth={1} />
-						<p>CTCF value distribution</p>
-					</div>
-				{/if}
-			</div>
+			<ChartCard
+				title="Area vs {activeCtcfCol}"
+				subtitle="Cell area vs corrected fluorescence"
+				loading={chartLoading}
+			empty={chartRows.length === 0 && !chartLoading}
+				emptyMessage="Run quantification to see scatter plot"
+			>
+				{#snippet children()}
+					<div class="chart-plot" id="plotly-scatter"></div>
+				{/snippet}
+			</ChartCard>
+
 		{:else if activeTab === 'spatial'}
-			<div class="chart-container" id="plotly-spatial">
-				{#if rows.length === 0}
-					<div class="placeholder font-ui">
-						<BarChart3 size={48} strokeWidth={1} />
-						<p>Spatial map of cell centroids colored by CTCF</p>
-					</div>
-				{:else if !columns.includes('x_centroid')}
-					<div class="placeholder font-ui">
-						<AlertTriangle size={48} strokeWidth={1} />
-						<p>Spatial data not available (QC filters may need to be enabled)</p>
-					</div>
-				{/if}
-			</div>
+			<ChartCard
+				title="Spatial {activeCtcfCol} Map"
+				subtitle="Cell centroids colored by fluorescence intensity"
+				loading={chartLoading}
+			empty={(chartRows.length === 0 && !chartLoading) || !chartColumns.includes('x_centroid')}
+				emptyMessage={!chartColumns.includes('x_centroid') ? 'Spatial data not available (centroid columns missing)' : 'Run quantification to see spatial map'}
+			>
+				{#snippet children()}
+					<div class="chart-plot" id="plotly-spatial"></div>
+				{/snippet}
+			</ChartCard>
+
 		{:else if activeTab === 'qcsummary'}
 			<div class="table-container">
 				{#if summaryRows.length > 0}
@@ -412,20 +632,23 @@
 				{:else}
 					<div class="placeholder font-ui">
 						<BarChart3 size={48} strokeWidth={1} />
-						<p>Hierarchical summary (Cells → FOVs → Conditions)</p>
+						<p>Hierarchical summary (Cells &rarr; FOVs &rarr; Conditions)</p>
 						<p class="hint">Run quantification to generate QC summary</p>
 					</div>
 				{/if}
 			</div>
+
 		{:else if activeTab === 'perfov'}
-			<div class="chart-container" id="plotly-perfov">
-				{#if fovRows.length === 0}
-					<div class="placeholder font-ui">
-						<BarChart3 size={48} strokeWidth={1} />
-						<p>Per-FOV median CTCF distribution</p>
-					</div>
-				{/if}
-			</div>
+			<ChartCard
+				title="Per-FOV Median CTCF"
+				subtitle="Each point is one field of view"
+				empty={fovRows.length === 0}
+				emptyMessage="Run quantification to see per-FOV data"
+			>
+				{#snippet children()}
+					<div class="chart-plot" id="plotly-perfov"></div>
+				{/snippet}
+			</ChartCard>
 		{/if}
 	</section>
 </div>
@@ -434,13 +657,15 @@
 	.page-results {
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
+		gap: 12px;
 	}
+
+	/* ── Summary cards ──────────────────────────────── */
 
 	.summary-row {
 		display: grid;
 		grid-template-columns: repeat(4, 1fr);
-		gap: 16px;
+		gap: 12px;
 	}
 
 	:global(.dark) .summary-row {
@@ -475,19 +700,31 @@
 		margin-top: 4px;
 	}
 
-	.export-bar {
+	/* ── Toolbar ────────────────────────────────────── */
+
+	.toolbar {
 		display: flex;
 		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
 		gap: 8px;
 	}
 
-	.export-label {
+	.toolbar-left,
+	.toolbar-right {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.toolbar-label {
 		font-size: 12px;
 		color: var(--text-muted);
 		font-weight: 500;
 	}
 
-	.export-btn {
+	.toolbar-btn {
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
@@ -499,31 +736,92 @@
 		font-size: 12px;
 		font-weight: 500;
 		cursor: pointer;
-		transition: all var(--transition-fast);
+		transition: all 0.15s ease;
 	}
 
-	.export-btn:hover {
+	.toolbar-btn:hover {
 		border-color: var(--accent);
 		color: var(--accent);
 	}
 
-	.refresh-btn {
-		margin-left: auto;
+	.toolbar-select {
+		padding: 4px 8px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		color: var(--text);
+		font-size: 12px;
+		cursor: pointer;
 	}
 
-	.toggle-flagged {
+	.toolbar-select:focus {
+		border-color: var(--accent);
+		outline: none;
+	}
+
+	.palette-select {
+		color: var(--accent);
+		font-weight: 600;
+	}
+
+	.toolbar-check {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		font-size: 12px;
+		gap: 4px;
+		font-size: 11px;
 		color: var(--text-muted);
 		cursor: pointer;
-		margin-left: 12px;
+		white-space: nowrap;
 	}
 
-	.toggle-flagged input {
+	.toolbar-check input {
 		accent-color: var(--accent);
+		width: 13px;
+		height: 13px;
 	}
+
+	.toolbar-sep {
+		width: 1px;
+		height: 18px;
+		background: var(--border);
+		margin: 0 2px;
+	}
+
+	/* ── Chart type toggle ──────────────────────────── */
+
+	.chart-type-toggle {
+		display: flex;
+		gap: 1px;
+		background: var(--border);
+		border-radius: var(--radius-sm);
+		overflow: hidden;
+	}
+
+	.toggle-btn {
+		padding: 4px 12px;
+		background: var(--bg-elevated);
+		border: none;
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--text-muted);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.toggle-btn:hover {
+		color: var(--text);
+	}
+
+	.toggle-btn.active {
+		background: var(--accent);
+		color: white;
+	}
+
+	:global(.dark) .toggle-btn.active {
+		color: #000;
+	}
+
+	/* ── Tabs ───────────────────────────────────────── */
 
 	.tab-bar {
 		display: flex;
@@ -533,31 +831,27 @@
 	}
 
 	.tab-btn {
-		padding: 12px 20px;
+		padding: 10px 18px;
 		background: transparent;
 		border: none;
-		border-bottom: 3px solid transparent;
+		border-bottom: 2px solid transparent;
 		color: var(--text-muted);
 		font-size: 13px;
 		font-weight: 400;
 		cursor: pointer;
-		transition: all 0.2s ease;
+		transition: all 0.15s ease;
 		white-space: nowrap;
 	}
 
-	.tab-btn:hover {
-		color: var(--accent);
-	}
+	.tab-btn:hover { color: var(--text); }
 
 	.tab-btn.active {
 		color: var(--accent);
-		font-weight: 700;
+		font-weight: 600;
 		border-bottom-color: var(--accent);
 	}
 
-	:global(.dark) .tab-btn.active {
-		font-weight: 500;
-	}
+	/* ── Content area ───────────────────────────────── */
 
 	.results-content {
 		background: var(--bg-elevated);
@@ -570,6 +864,38 @@
 
 	:global(.dark) .results-content {
 		box-shadow: none;
+	}
+
+	/* ── Chart plot area ────────────────────────────── */
+
+	.chart-plot {
+		width: 100%;
+		min-height: 440px;
+	}
+
+	/* Hide plotly modebar by default, show on hover */
+	.results-content :global(.modebar) {
+		opacity: 0;
+		transition: opacity 0.2s ease;
+	}
+
+	.results-content:hover :global(.modebar) {
+		opacity: 1;
+	}
+
+	.results-content :global(.modebar-btn) {
+		font-size: 14px !important;
+	}
+
+	/* ── Table ──────────────────────────────────────── */
+
+	.table-scroll-top {
+		overflow-x: auto;
+		overflow-y: hidden;
+	}
+
+	.table-scroll-top-inner {
+		height: 1px;
 	}
 
 	.table-container {
@@ -588,7 +914,7 @@
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
-		padding: 12px 14px;
+		padding: 10px 12px;
 		text-align: left;
 		position: sticky;
 		top: 0;
@@ -612,7 +938,7 @@
 	}
 
 	.results-table tbody td {
-		padding: 10px 14px;
+		padding: 8px 12px;
 		font-size: 12px;
 		border-bottom: 1px solid var(--border);
 		color: var(--text);
@@ -630,32 +956,30 @@
 	}
 
 	.results-table tbody tr:nth-child(even) td {
-		background: rgba(212, 165, 165, 0.06);
-	}
-
-	.results-table tbody tr.flagged-row:nth-child(even) td.flag-cell {
-		background: rgba(255, 60, 60, 0.15);
+		background: rgba(0, 0, 0, 0.02);
 	}
 
 	:global(.dark) .results-table tbody tr:nth-child(even) td {
-		background: transparent;
+		background: rgba(255, 255, 255, 0.02);
 	}
 
 	.results-table tbody tr:hover td {
 		background: var(--accent-soft);
 	}
 
+	/* ── Pagination ─────────────────────────────────── */
+
 	.pagination {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		gap: 16px;
-		padding: 16px;
+		padding: 14px;
 		border-top: 1px solid var(--border);
 	}
 
 	.page-btn {
-		padding: 6px 16px;
+		padding: 5px 14px;
 		background: var(--bg);
 		border: 1px solid var(--border);
 		border-radius: var(--radius-sm);
@@ -663,7 +987,7 @@
 		font-size: 12px;
 		font-weight: 500;
 		cursor: pointer;
-		transition: all var(--transition-fast);
+		transition: all 0.15s ease;
 	}
 
 	.page-btn:hover:not(:disabled) {
@@ -681,10 +1005,7 @@
 		color: var(--text-muted);
 	}
 
-	.chart-container {
-		min-height: 400px;
-		padding: 16px;
-	}
+	/* ── Placeholder ────────────────────────────────── */
 
 	.placeholder {
 		text-align: center;

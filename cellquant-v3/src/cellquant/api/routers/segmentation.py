@@ -33,6 +33,11 @@ async def start_segmentation(req: SegmentationRequest):
         "use_gpu": req.use_gpu,
         "batch_size": req.batch_size,
         "skip_existing": req.skip_existing,
+        "segmentation_suffixes": req.segmentation_suffixes,
+        "condition_overrides": {
+            k: v.model_dump(exclude_none=True)
+            for k, v in (req.condition_overrides or {}).items()
+        },
     }
 
     task_id = queue.submit(

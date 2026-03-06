@@ -51,6 +51,25 @@ export async function browseFolder(): Promise<string | null> {
 	return res.path;
 }
 
+export interface DirEntry {
+	name: string;
+	path: string;
+	is_dir: boolean;
+}
+
+export interface ListDirResponse {
+	path: string;
+	parent: string | null;
+	entries: DirEntry[];
+}
+
+export async function listDir(path?: string): Promise<ListDirResponse> {
+	return request('/experiments/list-dir', {
+		method: 'POST',
+		body: JSON.stringify({ path: path || null }),
+	});
+}
+
 export async function scanExperiment(folderPath: string, outputPath?: string): Promise<ScanResponse> {
 	return request('/experiments/scan', {
 		method: 'POST',
@@ -138,6 +157,40 @@ export function renderUrl(
 	return base;
 }
 
+export function rawTiffUrl(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	channel: string
+): string {
+	return `${BASE}/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${encodeURIComponent(channel)}/raw`;
+}
+
+export function imagePngUrl(
+	sessionId: string,
+	condition: string,
+	baseName: string,
+	channel: string
+): string {
+	return `${BASE}/images/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${encodeURIComponent(channel)}/png`;
+}
+
+export function maskTiffUrl(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): string {
+	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/tiff`;
+}
+
+export function maskPngUrl(
+	sessionId: string,
+	condition: string,
+	baseName: string
+): string {
+	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/png`;
+}
+
 export async function getImageMetadata(
 	sessionId: string,
 	condition: string,
@@ -198,9 +251,9 @@ export function maskRenderUrl(
 	baseName: string,
 	size: number = 800,
 	style: 'filled' | 'outline' = 'filled',
-	bg: 'composite' | 'cyto' = 'composite'
+	bg: string = ''
 ): string {
-	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/render?size=${size}&style=${style}&bg=${bg}`;
+	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/render?size=${size}&style=${style}&bg=${encodeURIComponent(bg)}`;
 }
 
 export function maskTileUrl(
@@ -395,6 +448,14 @@ export async function getResultsPage(
 	page: number
 ): Promise<ResultsPage> {
 	return request(`/quantification/results/${sessionId}/page/${page}`);
+}
+
+export async function getChartData(sessionId: string): Promise<{
+	columns: string[];
+	data: Record<string, unknown>[];
+	total_rows: number;
+}> {
+	return request(`/quantification/chart-data/${sessionId}`);
 }
 
 export async function getResultsSummary(sessionId: string): Promise<ResultsSummary> {

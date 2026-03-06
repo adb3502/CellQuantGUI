@@ -1,18 +1,18 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
-	import { Microscope, Play, Square, RotateCcw, ChevronLeft, ChevronRight, FolderOpen, Calculator, Info } from 'lucide-svelte';
+	import { Microscope, Play, Square, RotateCcw, ChevronLeft, ChevronRight, ChevronDown, FolderOpen, Calculator, Info, Settings2 } from 'lucide-svelte';
 	import { runSegmentation, cancelSegmentation, maskRenderUrl, openResultFolder, runQuantification, getMaskStatus } from '$api/client';
 	import { ProgressSocket } from '$api/websocket';
 	import type { ProgressMessage, QCFilterParams, MaskStatusResponse } from '$api/types';
 	import ConfirmDialog from '$components/ui/ConfirmDialog.svelte';
 	import { sessionId } from '$stores/session';
-	import { detection, channelRoles } from '$stores/experiment';
+	import { detection, channelRoles, conditions, excludedConditions, activeImageCount } from '$stores/experiment';
 	import {
 		segParams, segTaskId, resetSegState,
 		segRunning, segProgress, segMessage, segWsStatus,
 		segElapsed, segResult, segLogs, segCompletedImages,
-		type CompletedImage
+		conditionOverrides, type ConditionSegOverride, type CompletedImage
 	} from '$stores/segmentation';
 	import { quantTaskId, qcFilterResults, type QCFilterResult } from '$stores/quantification';
 	import TaskStatus from '$components/progress/TaskStatus.svelte';
@@ -67,7 +67,22 @@
 	let previewIndex = $state(0);
 	let activeCondition = $state('');
 	let overlayStyle: 'filled' | 'outline' = $state('outline');
-	let overlayBg: 'composite' | 'cyto' = $state('cyto');
+	let overlayBg = $state('');  // channel suffix, set dynamically
+
+	// Build preview channel options from channel roles
+	let previewChannelOptions = $derived(
+		$channelRoles
+			.filter(r => !r.excluded)
+			.map(r => ({ suffix: r.suffix, label: r.name || r.suffix }))
+	);
+
+	// Default to cyto/brightfield suffix if available
+	$effect(() => {
+		if (!overlayBg && previewChannelOptions.length > 0) {
+			const cyto = $channelRoles.find(r => r.role === 'whole_cell' && !r.excluded);
+			overlayBg = cyto?.suffix ?? previewChannelOptions[0].suffix;
+		}
+	});
 
 	let previewConditions = $derived(
 		[...new Set($segCompletedImages.map(img => img.condition))]
@@ -181,37 +196,60 @@
 		}
 	}
 
+	// Confirmation dialog content
+	let confirmSkipExisting = $state(false);
+
+	// Derived summary for confirmation
+	let activeConditionNames = $derived(
+		$conditions.filter(c => !$excludedConditions.has(c.name)).map(c => c.name)
+	);
+	let segChannels = $derived(
+		$channelRoles.filter(r => r.useForSegmentation && !r.excluded)
+	);
+	let quantChannels = $derived(
+		$channelRoles.filter(r => r.quantify && !r.excluded)
+	);
+	let modelLabel = $derived(
+		modelOptions.find(o => o.value === $segParams.model_type)?.label ?? $segParams.model_type
+	);
+	let condChOverrideSummary = $derived(
+		Object.entries($conditionOverrides)
+			.filter(([, ov]) => ov.segmentation_suffixes && ov.segmentation_suffixes.length > 0)
+			.map(([name, ov]) => `${name}: ${ov.segmentation_suffixes!.map(s => $channelRoles.find(r => r.suffix === s)?.name || s).join(', ')}`)
+	);
+
 	async function handleRun() {
 		if (!$sessionId) return;
 
-		// Check for existing masks before starting
+		// Check for existing masks
 		await checkMaskStatus();
+
+		// Build confirmation dialog
+		dialogTitle = 'Confirm Analysis';
+		confirmSkipExisting = false;
 
 		if (maskStatus && maskStatus.total_masks > 0) {
 			if (maskStatus.is_complete) {
-				// All images already segmented
-				dialogTitle = 'Segmentation Complete';
-				dialogMessage = `All ${maskStatus.total_masks} images already have masks. Re-run segmentation from scratch?`;
 				dialogActions = [
-					{ label: 'Re-run', variant: 'primary', onclick: () => { dialogOpen = false; doRun(false); } },
+					{ label: 'Re-run All', variant: 'primary', onclick: () => { dialogOpen = false; doRun(false); } },
 					{ label: 'Cancel', variant: 'danger', onclick: () => { dialogOpen = false; } },
 				];
 			} else {
-				// Partial masks exist
-				dialogTitle = 'Existing Masks Found';
-				dialogMessage = `Found masks for ${maskStatus.total_masks} of ${maskStatus.expected_total} images. Continue from where you left off or start fresh?`;
+				confirmSkipExisting = true;
 				dialogActions = [
 					{ label: 'Continue', variant: 'primary', onclick: () => { dialogOpen = false; doRun(true); } },
 					{ label: 'Start Fresh', variant: 'secondary', onclick: () => { dialogOpen = false; doRun(false); } },
 					{ label: 'Cancel', variant: 'danger', onclick: () => { dialogOpen = false; } },
 				];
 			}
-			dialogOpen = true;
-			return;
+		} else {
+			dialogActions = [
+				{ label: alsoQuantify ? 'Run Analysis' : 'Run Segmentation', variant: 'primary', onclick: () => { dialogOpen = false; doRun(false); } },
+				{ label: 'Cancel', variant: 'danger', onclick: () => { dialogOpen = false; } },
+			];
 		}
 
-		// No existing masks — run directly
-		doRun(false);
+		dialogOpen = true;
 	}
 
 	async function doRun(skipExisting: boolean) {
@@ -234,10 +272,26 @@
 		connectWebSocket();
 
 		try {
+			// Send user's channel selection for segmentation input
+			const userSegSuffixes = $channelRoles
+				.filter(r => r.useForSegmentation && !r.excluded)
+				.map(r => r.suffix);
+
+			// Build per-condition overrides (filter out empty ones)
+			const overrides: Record<string, Record<string, unknown>> = {};
+			for (const [name, ov] of Object.entries($conditionOverrides)) {
+				const filtered = Object.fromEntries(
+					Object.entries(ov).filter(([, v]) => v !== undefined && v !== null)
+				);
+				if (Object.keys(filtered).length > 0) overrides[name] = filtered;
+			}
+
 			const { task_id } = await runSegmentation($sessionId, {
 				...$segParams,
 				skip_existing: skipExisting,
-			});
+				segmentation_suffixes: userSegSuffixes.length > 0 ? userSegSuffixes : null,
+				condition_overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+			} as any);
 			$segTaskId = task_id;
 			$segWsStatus = 'running';
 		} catch (e) {
@@ -385,9 +439,80 @@
 <ConfirmDialog
 	open={dialogOpen}
 	title={dialogTitle}
-	message={dialogMessage}
+	message=""
 	actions={dialogActions}
-/>
+>
+	{#snippet body()}
+		<div class="confirm-summary">
+			{#if confirmSkipExisting && maskStatus}
+				<div class="confirm-notice font-ui">
+					Found masks for {maskStatus.total_masks} of {maskStatus.expected_total} images.
+				</div>
+			{/if}
+
+			<div class="confirm-section">
+				<div class="confirm-label font-ui">Conditions</div>
+				<div class="confirm-tags">
+					{#each activeConditionNames as name}
+						<span class="confirm-tag cond-tag">{name}</span>
+					{/each}
+				</div>
+				<div class="confirm-detail font-mono">{$activeImageCount} image sets</div>
+			</div>
+
+			<div class="confirm-section">
+				<div class="confirm-label font-ui">Segmentation Channels</div>
+				<div class="confirm-tags">
+					{#each segChannels as ch}
+						<span class="confirm-tag" style="border-left: 3px solid {ch.color}">
+							{ch.name || ch.suffix}
+						</span>
+					{/each}
+					{#if segChannels.length === 0}
+						<span class="confirm-detail font-mono">Auto-detect</span>
+					{/if}
+				</div>
+				{#if condChOverrideSummary.length > 0}
+					<div class="confirm-detail font-mono" style="margin-top: 2px;">
+						{#each condChOverrideSummary as line}
+							{line}{' '}
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<div class="confirm-section">
+				<div class="confirm-label font-ui">Model</div>
+				<div class="confirm-detail font-mono">
+					{modelLabel} &middot; diameter {$segParams.diameter ?? 'auto'} &middot; flow {$segParams.flow_threshold.toFixed(1)} &middot; prob {$segParams.cellprob_threshold.toFixed(1)} &middot; min {$segParams.min_size}px
+				</div>
+			</div>
+
+			{#if alsoQuantify}
+				<div class="confirm-section">
+					<div class="confirm-label font-ui">Quantify Markers</div>
+					<div class="confirm-tags">
+						{#each quantChannels as ch}
+							<span class="confirm-tag" style="border-left: 3px solid {ch.color}">
+								{ch.name || ch.suffix}
+							</span>
+						{/each}
+						{#if quantChannels.length === 0}
+							<span class="confirm-detail font-mono">{markerSuffixes.join(', ') || 'Auto-detect'}</span>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			<div class="confirm-section">
+				<div class="confirm-detail font-mono">
+					GPU {$segParams.use_gpu ? 'on' : 'off'} &middot; batch {$segParams.batch_size}
+					{#if alsoQuantify}&middot; + quantification{/if}
+				</div>
+			</div>
+		</div>
+	{/snippet}
+</ConfirmDialog>
 
 <div class="page-segmentation">
 	<div class="two-col">
@@ -500,6 +625,101 @@
 				</div>
 			</div>
 
+			<!-- Per-condition overrides -->
+			{#if activeConditionNames.length > 1}
+				<details class="per-condition-section">
+					<summary class="per-condition-summary font-ui">
+						<Settings2 size={14} />
+						Per-Condition Settings
+						{#if Object.keys($conditionOverrides).length > 0}
+							<span class="override-count font-mono">{Object.keys($conditionOverrides).length} customized</span>
+						{/if}
+					</summary>
+					<div class="per-condition-grid">
+						{#each activeConditionNames as condName}
+							{@const hasOverride = !!$conditionOverrides[condName]}
+							<div class="per-condition-row" class:has-override={hasOverride}>
+								<div class="per-condition-header">
+									<label class="font-ui per-condition-name">{condName}</label>
+									<button class="btn-tiny font-ui" onclick={() => {
+										if (hasOverride) {
+											const copy = {...$conditionOverrides};
+											delete copy[condName];
+											$conditionOverrides = copy;
+										} else {
+											$conditionOverrides = {...$conditionOverrides, [condName]: {}};
+										}
+									}}>
+										{hasOverride ? 'Reset' : 'Customize'}
+									</button>
+								</div>
+								{#if hasOverride}
+									{@const globalSegSuffixes = $channelRoles.filter(r => r.useForSegmentation && !r.excluded).map(r => r.suffix)}
+									{@const condSegSuffixes = $conditionOverrides[condName]?.segmentation_suffixes ?? null}
+									<div class="per-condition-channels">
+										<label class="field-label font-ui">Seg Channels</label>
+										<div class="per-condition-ch-row">
+											{#each $channelRoles.filter(r => !r.excluded) as ch}
+												{@const isActive = condSegSuffixes ? condSegSuffixes.includes(ch.suffix) : globalSegSuffixes.includes(ch.suffix)}
+												<label class="per-condition-ch-label font-ui" style="border-left: 2px solid {ch.color}; padding-left: 4px;">
+													<input type="checkbox" checked={isActive}
+														onchange={() => {
+															const current = condSegSuffixes ?? [...globalSegSuffixes];
+															const next = isActive
+																? current.filter((s: string) => s !== ch.suffix)
+																: [...current, ch.suffix];
+															$conditionOverrides = {...$conditionOverrides, [condName]: {
+																...$conditionOverrides[condName],
+																segmentation_suffixes: next.length > 0 ? next : undefined
+															}};
+														}} />
+													{ch.name || ch.suffix}
+												</label>
+											{/each}
+										</div>
+									</div>
+									<div class="per-condition-fields">
+										<label class="field-label font-ui">Diameter</label>
+										<input type="number" class="field-input field-sm font-mono"
+											value={$conditionOverrides[condName]?.diameter ?? ''}
+											placeholder={String($segParams.diameter ?? 'auto')}
+											onchange={(e) => {
+												const v = e.currentTarget.value;
+												$conditionOverrides = {...$conditionOverrides, [condName]: {
+													...$conditionOverrides[condName],
+													diameter: v ? Number(v) : undefined
+												}};
+											}} />
+										<label class="field-label font-ui">Flow</label>
+										<input type="number" class="field-input field-sm font-mono" step="0.1"
+											value={$conditionOverrides[condName]?.flow_threshold ?? ''}
+											placeholder={String($segParams.flow_threshold)}
+											onchange={(e) => {
+												const v = e.currentTarget.value;
+												$conditionOverrides = {...$conditionOverrides, [condName]: {
+													...$conditionOverrides[condName],
+													flow_threshold: v ? Number(v) : undefined
+												}};
+											}} />
+										<label class="field-label font-ui">Min Size</label>
+										<input type="number" class="field-input field-sm font-mono"
+											value={$conditionOverrides[condName]?.min_size ?? ''}
+											placeholder={String($segParams.min_size)}
+											onchange={(e) => {
+												const v = e.currentTarget.value;
+												$conditionOverrides = {...$conditionOverrides, [condName]: {
+													...$conditionOverrides[condName],
+													min_size: v ? Number(v) : undefined
+												}};
+											}} />
+									</div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				</details>
+			{/if}
+
 			{#if maskStatus && !$segRunning && !quantRunning}
 				{#if maskStatus.total_masks > 0}
 					<div class="mask-banner">
@@ -578,10 +798,10 @@
 							Segmentation Preview
 							<span class="seg-preview-count font-mono">{$segCompletedImages.length} images</span>
 							<span class="style-toggle">
-								<button class="style-btn font-ui" class:active={overlayBg === 'composite'}
-									onclick={() => { overlayBg = 'composite'; }}>Cyto</button>
-								<button class="style-btn font-ui" class:active={overlayBg === 'cyto'}
-									onclick={() => { overlayBg = 'cyto'; }}>Composite</button>
+								{#each previewChannelOptions as ch}
+									<button class="style-btn font-ui" class:active={overlayBg === ch.suffix}
+										onclick={() => { overlayBg = ch.suffix; }}>{ch.label}</button>
+								{/each}
 							</span>
 							<span class="style-toggle">
 								<button class="style-btn font-ui" class:active={overlayStyle === 'filled'}
@@ -1204,6 +1424,183 @@
 		font-size: 12px;
 		color: #e44;
 		margin: 0;
+	}
+
+	/* ── Confirm dialog summary ────────────────────────── */
+
+	.confirm-summary {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.confirm-notice {
+		font-size: 12px;
+		color: var(--accent);
+		padding: 8px 12px;
+		background: var(--accent-soft);
+		border-radius: var(--radius-md);
+		border: 1px solid var(--accent);
+	}
+
+	.confirm-section {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.confirm-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.confirm-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.confirm-tag {
+		font-size: 11px;
+		padding: 2px 8px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-pill);
+		background: var(--bg);
+		font-family: var(--font-mono);
+	}
+
+	.cond-tag {
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+
+	.confirm-detail {
+		font-size: 12px;
+		color: var(--text-muted);
+	}
+
+	/* ── Per-condition settings ──────────────────────────── */
+
+	.per-condition-section {
+		margin-top: 16px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+	}
+
+	.per-condition-summary {
+		padding: 10px 14px;
+		cursor: pointer;
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text-muted);
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		user-select: none;
+	}
+
+	.per-condition-summary:hover {
+		color: var(--text);
+	}
+
+	.override-count {
+		font-size: 10px;
+		font-weight: 400;
+		color: var(--accent);
+		margin-left: auto;
+	}
+
+	.per-condition-grid {
+		padding: 8px 14px 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.per-condition-row {
+		padding: 8px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+	}
+
+	.per-condition-row.has-override {
+		border-color: var(--accent);
+		background: var(--accent-soft);
+	}
+
+	.per-condition-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.per-condition-name {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text);
+	}
+
+	.btn-tiny {
+		font-size: 10px;
+		padding: 2px 8px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--bg-elevated);
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+
+	.btn-tiny:hover {
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+
+	.per-condition-channels {
+		margin-bottom: 6px;
+	}
+
+	.per-condition-channels .field-label {
+		margin-bottom: 4px;
+	}
+
+	.per-condition-ch-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px 10px;
+	}
+
+	.per-condition-ch-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-size: 11px;
+		color: var(--text);
+		cursor: pointer;
+	}
+
+	.per-condition-ch-label input[type="checkbox"] {
+		accent-color: var(--accent);
+		width: 13px;
+		height: 13px;
+		cursor: pointer;
+	}
+
+	.per-condition-fields {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 4px 8px;
+		margin-top: 8px;
+		align-items: center;
+	}
+
+	.field-sm {
+		padding: 4px 8px;
+		font-size: 12px;
 	}
 
 	@media (max-width: 900px) {
