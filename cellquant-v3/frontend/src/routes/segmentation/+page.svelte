@@ -12,6 +12,7 @@
 		segParams, segTaskId, resetSegState,
 		segRunning, segProgress, segMessage, segWsStatus,
 		segElapsed, segResult, segLogs, segCompletedImages,
+		nuclearSegAvailable,
 		conditionOverrides, type ConditionSegOverride, type CompletedImage
 	} from '$stores/segmentation';
 	import { quantTaskId, qcFilterResults, type QCFilterResult } from '$stores/quantification';
@@ -52,7 +53,9 @@
 	async function checkMaskStatus() {
 		if (!$sessionId) return;
 		try {
-			maskStatus = await getMaskStatus($sessionId);
+			const status = await getMaskStatus($sessionId);
+			maskStatus = status;
+			if (status.has_nuclear) $nuclearSegAvailable = true;
 		} catch {
 			maskStatus = null;
 		}
@@ -68,6 +71,7 @@
 	let activeCondition = $state('');
 	let overlayStyle: 'filled' | 'outline' = $state('outline');
 	let overlayBg = $state('');  // channel suffix, set dynamically
+	let previewMode = $state<'cells' | 'nuclei'>('cells');
 
 	// Build preview channel options from channel roles
 	let previewChannelOptions = $derived(
@@ -98,7 +102,7 @@
 
 	let previewSrc = $derived(
 		currentPreview && $sessionId
-			? maskRenderUrl($sessionId, currentPreview.condition, currentPreview.baseName, 800, overlayStyle, overlayBg)
+			? maskRenderUrl($sessionId, currentPreview.condition, currentPreview.baseName, 800, overlayStyle, overlayBg, previewMode === 'nuclei')
 			: null
 	);
 
@@ -169,6 +173,9 @@
 			prevCurrent = cur;
 			prevCondition = msg.condition ?? '';
 			prevImageSet = msg.image_set ?? '';
+			if ((msg.data as Record<string, unknown>)?.has_nuclear) {
+				$nuclearSegAvailable = true;
+			}
 		} else if (msg.type === 'task_complete') {
 			// Last image also completed
 			if (prevCondition && prevImageSet) {
@@ -396,6 +403,7 @@
 		resetSegState();
 		activeCondition = '';
 		previewIndex = 0;
+		previewMode = 'cells';
 		quantRunning = false;
 		quantProgress = 0;
 		quantMessage = '';
@@ -818,6 +826,36 @@
 					result={$segResult}
 				/>
 
+				<!-- Quantification status (chained) -->
+				{#if alsoQuantify && (quantStatus !== 'pending' || quantRunning)}
+					<div class="quant-status">
+						<h3 class="quant-status-header font-ui">
+							<Calculator size={14} />
+							Quantification
+						</h3>
+						{#if quantRunning}
+							<div class="quant-progress-row">
+								<div class="quant-progress-bar">
+									<div class="quant-progress-fill" style="width: {quantProgress}%"></div>
+								</div>
+								<span class="quant-progress-pct font-mono">{Math.round(quantProgress)}%</span>
+							</div>
+							<p class="quant-message font-ui">{quantMessage}</p>
+						{:else if quantStatus === 'complete'}
+							<p class="quant-done font-ui">
+								Quantification complete
+								{#if quantResult}
+									&mdash; {quantResult.total_cells} cells,
+									{quantResult.qc_rejected} QC rejected,
+									{quantResult.outliers_flagged} outliers flagged
+								{/if}
+							</p>
+						{:else if quantStatus === 'error'}
+							<p class="quant-error font-ui">{quantMessage}</p>
+						{/if}
+					</div>
+				{/if}
+
 				<!-- Segmentation Preview carousel -->
 				{#if $segCompletedImages.length > 0}
 					<div class="seg-preview">
@@ -836,6 +874,14 @@
 								<button class="style-btn font-ui" class:active={overlayStyle === 'outline'}
 									onclick={() => { overlayStyle = 'outline'; }}>Outline</button>
 							</span>
+							{#if $nuclearSegAvailable}
+								<span class="style-toggle">
+									<button class="style-btn font-ui" class:active={previewMode === 'cells'}
+										onclick={() => previewMode = 'cells'}>Cells</button>
+									<button class="style-btn font-ui" class:active={previewMode === 'nuclei'}
+										onclick={() => previewMode = 'nuclei'}>Nuclei</button>
+								</span>
+							{/if}
 						</h3>
 
 						<!-- Condition tabs -->
@@ -894,35 +940,6 @@
 					<pre class="log-output font-mono" bind:this={logPre}>{$segLogs.length > 0 ? $segLogs.join('\n') : 'Waiting for output...'}</pre>
 				</details>
 
-				<!-- Quantification status (when chained) -->
-				{#if alsoQuantify && (quantStatus !== 'pending' || quantRunning)}
-					<div class="quant-status">
-						<h3 class="quant-status-header font-ui">
-							<Calculator size={14} />
-							Quantification
-						</h3>
-						{#if quantRunning}
-							<div class="quant-progress-row">
-								<div class="quant-progress-bar">
-									<div class="quant-progress-fill" style="width: {quantProgress}%"></div>
-								</div>
-								<span class="quant-progress-pct font-mono">{Math.round(quantProgress)}%</span>
-							</div>
-							<p class="quant-message font-ui">{quantMessage}</p>
-						{:else if quantStatus === 'complete'}
-							<p class="quant-done font-ui">
-								Quantification complete
-								{#if quantResult}
-									— {quantResult.total_cells} cells,
-									{quantResult.qc_rejected} QC rejected,
-									{quantResult.outliers_flagged} outliers flagged
-								{/if}
-							</p>
-						{:else if quantStatus === 'error'}
-							<p class="quant-error font-ui">{quantMessage}</p>
-						{/if}
-					</div>
-				{/if}
 			{:else}
 				<!-- Standalone quantification status (no seg task running) -->
 				{#if quantStatus !== 'pending' || quantRunning}

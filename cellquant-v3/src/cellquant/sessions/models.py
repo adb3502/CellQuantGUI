@@ -68,6 +68,11 @@ class Session:
         p.mkdir(parents=True, exist_ok=True)
         return p / f"{base_name}_masks.npy"
 
+    def get_nuclear_mask_path(self, condition: str, base_name: str) -> Path:
+        p = self.directory / "masks" / condition
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"{base_name}_nuclear_masks.npy"
+
     def get_thumbnail_path(self, condition: str, base_name: str, channel: str) -> Path:
         p = self.directory / "thumbnails" / condition
         p.mkdir(parents=True, exist_ok=True)

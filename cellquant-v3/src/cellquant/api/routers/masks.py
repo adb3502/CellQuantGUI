@@ -126,6 +126,7 @@ async def render_mask_overlay(
     size: int = Query(default=800, ge=100, le=4096),
     style: str = Query(default="filled", pattern="^(filled|outline)$"),
     bg: str = Query(default=""),
+    nuclear: bool = Query(default=False),
 ):
     """Render mask overlay on a background image.
 
@@ -141,7 +142,6 @@ async def render_mask_overlay(
     from cellquant.core.io.image_loader import load_image
 
     session = get_session(session_id)
-    masks = _get_masks(session, condition, base_name)
 
     cond_data = session.conditions.get(condition, {})
     image_sets = cond_data.get("image_sets", {})
@@ -149,13 +149,28 @@ async def render_mask_overlay(
     if not channels:
         raise HTTPException(404, f"No channels found: {condition}/{base_name}")
 
+    if nuclear:
+        # Load nuclear masks
+        nuc_mask_path = session.get_nuclear_mask_path(condition, base_name)
+        if not nuc_mask_path.exists():
+            raise HTTPException(404, f"Nuclear masks not found: {condition}/{base_name}")
+        import numpy as np
+        masks = np.load(nuc_mask_path)
+        # Use nuclear_suffix as background channel
+        nuclear_suffix = cond_data.get("nuclear_suffix", "")
+        if nuclear_suffix:
+            bg = nuclear_suffix
+    else:
+        masks = _get_masks(session, condition, base_name)
+
     # Sanitize bg for cache key
     bg_key = bg if bg else "default"
     cache_dir = session.directory / "renders" / condition / base_name
     cache_dir.mkdir(parents=True, exist_ok=True)
     # Outlines are saved as PNG (lossless) — JPEG destroys 1-px red lines via DCT compression
     cache_ext = "png" if style == "outline" else "jpg"
-    cache_path = cache_dir / f"mask_{style}_{bg_key}_{size}.{cache_ext}"
+    cache_prefix = "nuclear_mask" if nuclear else "mask"
+    cache_path = cache_dir / f"{cache_prefix}_{style}_{bg_key}_{size}.{cache_ext}"
 
     if not cache_path.exists():
         if bg:

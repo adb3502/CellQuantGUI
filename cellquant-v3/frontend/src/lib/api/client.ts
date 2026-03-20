@@ -252,9 +252,10 @@ export function maskRenderUrl(
 	baseName: string,
 	size: number = 800,
 	style: 'filled' | 'outline' = 'filled',
-	bg: string = ''
+	bg: string = '',
+	nuclear = false
 ): string {
-	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/render?size=${size}&style=${style}&bg=${encodeURIComponent(bg)}`;
+	return `${BASE}/masks/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/render?size=${size}&style=${style}&bg=${encodeURIComponent(bg)}&nuclear=${nuclear}`;
 }
 
 export function maskTileUrl(
@@ -492,12 +493,12 @@ async function downloadFile(path: string, filename: string): Promise<void> {
 	URL.revokeObjectURL(url);
 }
 
-export async function exportCsv(sessionId: string): Promise<void> {
-	await downloadFile(`/export/csv/${sessionId}`, 'cellquant_results.csv');
+export async function exportCsv(sessionId: string, includeOutliers = false): Promise<void> {
+	await downloadFile(`/export/csv/${sessionId}?include_outliers=${includeOutliers}`, 'cellquant_results.csv');
 }
 
-export async function exportExcel(sessionId: string): Promise<void> {
-	await downloadFile(`/export/excel/${sessionId}`, 'cellquant_results.xlsx');
+export async function exportExcel(sessionId: string, includeOutliers = false): Promise<void> {
+	await downloadFile(`/export/excel/${sessionId}?include_outliers=${includeOutliers}`, 'cellquant_results.xlsx');
 }
 
 export async function exportRois(

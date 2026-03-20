@@ -11,10 +11,11 @@
 		CLEAN_CONFIG, INTERACTIVE_CONFIG, VIRIDIS,
 	} from '$components/charts/chart-theme';
 
-	type TabId = 'table' | 'distribution' | 'scatter' | 'spatial' | 'background' | 'qcsummary' | 'perfov';
+	type TabId = 'table' | 'distribution' | 'scatter' | 'spatial' | 'background' | 'qcsummary' | 'perfov' | 'jc1';
 	let activeTab = $state<TabId>('table');
 	let loading = $state(false);
 	let showFlagged = $state(true);
+	let exportIncludeOutliers = $state(false);
 	let selectedCtcfCol = $state('');
 
 	// Chart options
@@ -26,6 +27,22 @@
 	let showGrid = $state(false);
 	let logScale = $state(false);
 	let excludeZeros = $state(false);
+
+	// JC-1 ratio mode
+	let jc1RedCol = $state('');
+	let jc1GreenCol = $state('');
+	const JC1_RED_KW = ['red','cy3','555','561','mcherry','tritc','rfp'];
+	const JC1_GREEN_KW = ['green','gfp','fitc','488','alexa488'];
+	let jc1RedActive = $derived(
+		(jc1RedCol && ctcfColumns.includes(jc1RedCol)) ? jc1RedCol
+			: ctcfColumns.find(c => JC1_RED_KW.some(k => c.toLowerCase().includes(k)))
+				?? ctcfColumns[1] ?? ctcfColumns[0] ?? ''
+	);
+	let jc1GreenActive = $derived(
+		(jc1GreenCol && ctcfColumns.includes(jc1GreenCol)) ? jc1GreenCol
+			: ctcfColumns.find(c => JC1_GREEN_KW.some(k => c.toLowerCase().includes(k)))
+				?? ctcfColumns[0] ?? ''
+	);
 
 	// Table (paginated)
 	let tableColumns = $derived($resultsPage?.columns ?? []);
@@ -75,6 +92,7 @@
 		{ id: 'background', label: 'Background' },
 		{ id: 'qcsummary', label: 'QC Summary' },
 		{ id: 'perfov', label: 'Per-FOV' },
+		{ id: 'jc1', label: 'JC-1 Ratio' },
 	];
 
 	// QC Summary data
@@ -196,6 +214,8 @@
 			renderBackground(Plotly, layout, theme, condCol, conditions);
 		} else if (tab === 'perfov') {
 			renderPerFov(Plotly, layout, theme);
+		} else if (tab === 'jc1') {
+			renderJC1(Plotly, layout, theme, condCol, conditions);
 		}
 	}
 
@@ -473,6 +493,75 @@
 		}, CLEAN_CONFIG);
 	}
 
+	function renderJC1(Plotly: any, layout: any, theme: any, condCol: string, conditions: string[]) {
+		const redCol = jc1RedActive;
+		const greenCol = jc1GreenActive;
+		if (!redCol || !greenCol || redCol === greenCol) return;
+
+		const traces: any[] = [];
+		const yLabel = logScale ? 'log₁₀(Red/Green + 1)' : 'Red / Green ratio';
+
+		conditions.forEach((cond, i) => {
+			const condRows = chartRows.filter(r => String(r[condCol]) === cond);
+			let ratios = condRows
+				.filter(r => (Number(r[greenCol]) || 0) > 0)
+				.map(r => (Number(r[redCol]) || 0) / (Number(r[greenCol]) || 1));
+			if (!showOutliers) ratios = removeOutliersIQR(ratios).filtered;
+			if (excludeZeros) ratios = ratios.filter(v => v > 0);
+			const vals = logScale ? ratios.map(v => Math.log10(Math.max(0, v) + 1)) : ratios;
+			const color = getColor(i, palette);
+
+			if (distType === 'violin') {
+				traces.push({
+					type: 'violin', name: cond,
+					x: vals.map(() => cond), y: vals,
+					width: 0.6, spanmode: 'soft',
+					box: { visible: true }, meanline: { visible: true },
+					points: showPoints ? 'all' : false,
+					marker: { color, size: 3, opacity: 0.6 },
+					line: { color, width: 1.5 }, fillcolor: color + '33',
+					hovertemplate: '<b>' + cond + '</b><br>Ratio: %{y:.3f}<extra></extra>',
+				});
+			} else if (distType === 'box') {
+				traces.push({
+					type: 'box', name: cond,
+					x: vals.map(() => cond), y: vals,
+					width: 0.5, boxpoints: showPoints ? 'all' : 'outliers',
+					jitter: 0.4, pointpos: 0,
+					marker: { color, size: 3, opacity: 0.6 },
+					line: { color, width: 1.5 }, fillcolor: color + '33',
+					hovertemplate: '<b>' + cond + '</b><br>Ratio: %{y:.3f}<extra></extra>',
+				});
+			} else {
+				const kde = computeKDE(vals);
+				if (kde.x.length > 0) {
+					traces.push({
+						type: 'scatter', mode: 'lines', name: cond,
+						x: kde.x, y: kde.y, fill: 'tozeroy',
+						line: { color, width: 2 }, fillcolor: color + '22',
+						hovertemplate: '<b>' + cond + '</b><br>Ratio: %{x:.3f}<br>Density: %{y:.4f}<extra></extra>',
+					});
+				}
+			}
+		});
+
+		Plotly.newPlot('plotly-jc1', traces, {
+			...layout,
+			margin: { l: 60, r: 20, t: 20, b: 80 },
+			yaxis: {
+				...(layout.yaxis as object),
+				title: { text: distType === 'density' ? 'Density' : yLabel, font: { size: 12, color: theme.textMuted } },
+				rangemode: distType !== 'density' ? 'nonnegative' as const : undefined,
+			},
+			xaxis: {
+				...(layout.xaxis as object),
+				title: distType === 'density' ? { text: yLabel, font: { size: 12, color: theme.textMuted } } : '',
+			},
+			violingap: 0.35, violingroupgap: 0.15,
+			boxgap: 0.3, boxgroupgap: 0.15,
+		}, CLEAN_CONFIG);
+	}
+
 	// Re-render when tab, data, options, or marker changes
 	$effect(() => {
 		const _tab = activeTab;
@@ -487,6 +576,8 @@
 		const _grid = showGrid;
 		const _log = logScale;
 		const _zeros = excludeZeros;
+		const _jc1r = jc1RedActive;
+		const _jc1g = jc1GreenActive;
 		if (_tab !== 'table' && _tab !== 'qcsummary' && _len > 0) {
 			setTimeout(() => renderChart(_tab), 50);
 		}
@@ -520,12 +611,16 @@
 	<div class="toolbar">
 		<div class="toolbar-left">
 			<span class="toolbar-label font-ui">Export:</span>
-			<button class="toolbar-btn font-ui" onclick={() => $sessionId && exportCsv($sessionId)}>
+			<button class="toolbar-btn font-ui" onclick={() => $sessionId && exportCsv($sessionId, exportIncludeOutliers)}>
 				<FileText size={14} /> CSV
 			</button>
-			<button class="toolbar-btn font-ui" onclick={() => $sessionId && exportExcel($sessionId)}>
+			<button class="toolbar-btn font-ui" onclick={() => $sessionId && exportExcel($sessionId, exportIncludeOutliers)}>
 				<FileSpreadsheet size={14} /> Excel
 			</button>
+			<label class="toolbar-check font-ui">
+				<input type="checkbox" bind:checked={exportIncludeOutliers} />
+				Include outliers
+			</label>
 
 			{#if effectiveCtcfColumns.length > 1}
 				<span class="toolbar-sep"></span>
@@ -584,7 +679,7 @@
 				{/if}
 			{/if}
 
-			{#if activeTab === 'distribution'}
+			{#if activeTab === 'distribution' || activeTab === 'jc1'}
 				<span class="toolbar-sep"></span>
 				<div class="chart-type-toggle">
 					<button class="toggle-btn font-ui" class:active={distType === 'violin'} onclick={() => distType = 'violin'}>Violin</button>
@@ -602,7 +697,7 @@
 						Points
 					</label>
 				{/if}
-				<label class="toolbar-check font-ui" title="Exclude cells with CTCF = 0">
+				<label class="toolbar-check font-ui" title="Exclude cells with ratio = 0">
 					<input type="checkbox" bind:checked={excludeZeros} />
 					No zeros
 				</label>
@@ -610,6 +705,22 @@
 					<input type="checkbox" bind:checked={logScale} />
 					Log
 				</label>
+			{/if}
+
+			{#if activeTab === 'jc1'}
+				<span class="toolbar-sep"></span>
+				<span class="toolbar-label font-ui" style="color:#FF6600">Red:</span>
+				<select class="toolbar-select font-ui" bind:value={jc1RedCol}>
+					{#each ctcfColumns as col}
+						<option value={col} selected={col === jc1RedActive}>{col.replace('_CTCF','')}</option>
+					{/each}
+				</select>
+				<span class="toolbar-label font-ui" style="color:#00CC44">÷ Green:</span>
+				<select class="toolbar-select font-ui" bind:value={jc1GreenCol}>
+					{#each ctcfColumns as col}
+						<option value={col} selected={col === jc1GreenActive}>{col.replace('_CTCF','')}</option>
+					{/each}
+				</select>
 			{/if}
 
 			{#if totalRows > 0}
@@ -781,6 +892,19 @@
 					<div class="chart-plot" id="plotly-perfov"></div>
 				{/snippet}
 			</ChartCard>
+
+		{:else if activeTab === 'jc1'}
+			<ChartCard
+				title="JC-1 Red / Green Ratio by Condition"
+				subtitle="{jc1RedActive.replace('_CTCF','')} ÷ {jc1GreenActive.replace('_CTCF','')} — mitochondrial membrane potential indicator"
+				loading={chartLoading}
+				empty={(chartRows.length === 0 && !chartLoading) || ctcfColumns.length < 2 || jc1RedActive === jc1GreenActive}
+				emptyMessage={ctcfColumns.length < 2 ? 'Need at least 2 quantified channels for JC-1 ratio' : jc1RedActive === jc1GreenActive ? 'Select different channels for red and green' : 'Run quantification to see JC-1 ratio'}
+			>
+				{#snippet children()}
+					<div class="chart-plot" id="plotly-jc1"></div>
+				{/snippet}
+			</ChartCard>
 		{/if}
 	</section>
 </div>
@@ -917,6 +1041,22 @@
 		height: 18px;
 		background: var(--border);
 		margin: 0 2px;
+	}
+
+	.toolbar-check {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: 12px;
+		color: var(--text-muted);
+		cursor: pointer;
+		user-select: none;
+		margin-left: 4px;
+	}
+
+	.toolbar-check input {
+		cursor: pointer;
+		accent-color: var(--accent);
 	}
 
 	/* ── Chart type toggle ──────────────────────────── */

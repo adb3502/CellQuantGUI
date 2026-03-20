@@ -58,3 +58,4 @@ class MaskStatusResponse(BaseModel):
     is_complete: bool
     has_results: bool = False
     results_n_cells: int = 0
+    has_nuclear: bool = False

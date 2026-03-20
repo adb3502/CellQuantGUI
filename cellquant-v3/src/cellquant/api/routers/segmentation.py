@@ -85,6 +85,12 @@ async def get_mask_status(session_id: str):
                     base_names=[],
                 ))
 
+    has_nuclear = any(
+        list(cond_dir.glob("*_nuclear_masks.npy"))
+        for cond_dir in [masks_root / cn for cn in session.conditions]
+        if cond_dir.exists()
+    ) if masks_root.exists() else False
+
     # Check for existing results
     has_results = False
     results_n_cells = 0
@@ -108,6 +114,7 @@ async def get_mask_status(session_id: str):
         is_complete=(total_masks >= expected_total and expected_total > 0),
         has_results=has_results,
         results_n_cells=results_n_cells,
+        has_nuclear=has_nuclear,
     )
 
 

@@ -10,8 +10,19 @@ from cellquant.api.dependencies import get_session
 router = APIRouter(prefix="/export", tags=["export"])
 
 
+def _filter_outliers(df, include_outliers: bool):
+    """Remove rows flagged as outliers unless include_outliers is True."""
+    if include_outliers:
+        return df
+    outlier_cols = [c for c in df.columns if c.startswith("is_outlier_")]
+    if not outlier_cols:
+        return df
+    mask = df[outlier_cols].any(axis=1)
+    return df[~mask]
+
+
 @router.post("/csv/{session_id}")
-async def export_csv(session_id: str):
+async def export_csv(session_id: str, include_outliers: bool = False):
     """Export results as CSV."""
     session = get_session(session_id)
 
@@ -23,7 +34,7 @@ async def export_csv(session_id: str):
     export_dir = session.get_export_dir()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     csv_path = export_dir / f"ctcf_results_{timestamp}.csv"
-    session.results_df.to_csv(csv_path, index=False)
+    _filter_outliers(session.results_df, include_outliers).to_csv(csv_path, index=False)
 
     return FileResponse(
         csv_path,
@@ -33,7 +44,7 @@ async def export_csv(session_id: str):
 
 
 @router.post("/excel/{session_id}")
-async def export_excel(session_id: str):
+async def export_excel(session_id: str, include_outliers: bool = False):
     """Export results as Excel."""
     session = get_session(session_id)
 
@@ -45,7 +56,7 @@ async def export_excel(session_id: str):
     export_dir = session.get_export_dir()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     xlsx_path = export_dir / f"ctcf_results_{timestamp}.xlsx"
-    session.results_df.to_excel(xlsx_path, index=False)
+    _filter_outliers(session.results_df, include_outliers).to_excel(xlsx_path, index=False)
 
     return FileResponse(
         xlsx_path,

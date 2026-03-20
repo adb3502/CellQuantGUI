@@ -78,6 +78,7 @@ export const segElapsed = writable(0);
 export const segResult = writable<Record<string, unknown> | null>(null);
 export const segLogs = writable<string[]>([]);
 export const segCompletedImages = writable<CompletedImage[]>([]);
+export const nuclearSegAvailable = writable(false);
 
 /** Reset all runtime state for a new run */
 export function resetSegState() {
@@ -90,4 +91,5 @@ export function resetSegState() {
 	segLogs.set([]);
 	segCompletedImages.set([]);
 	segTaskId.set(null);
+	nuclearSegAvailable.set(false);
 }

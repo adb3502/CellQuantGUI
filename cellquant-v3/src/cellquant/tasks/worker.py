@@ -55,6 +55,19 @@ def run_segmentation_task(
     # Cache engines by model_type to avoid reloading identical models
     engine_cache: dict = {params.model_type: engine}
 
+    # Nuclear segmentation for preview
+    has_any_nuclear = any(
+        cond.get("nuclear_suffix") for cond in session.conditions.values()
+    )
+    nuclear_seg_engine = None
+    if has_any_nuclear:
+        nuclear_seg_engine = CellposeEngine(
+            model_type="nuclei",
+            use_gpu=params.use_gpu,
+            batch_size=params.batch_size,
+        )
+        print(f"[CellQuant] Nuclear engine initialized for preview (model=nuclei)")
+
     for cond_name, cond_data in session.conditions.items():
         if task.status == "cancelled":
             break
@@ -186,12 +199,12 @@ def run_segmentation_task(
             np.save(mask_path, masks)
 
             # Save outputs to per-image-set folder (matching v1 structure)
+            image_set_dir = session.directory / cond_name / base_name
+            image_set_dir.mkdir(parents=True, exist_ok=True)
             try:
                 from skimage import io as skio
 
                 seg_type = params.model_type
-                image_set_dir = session.directory / cond_name / base_name
-                image_set_dir.mkdir(parents=True, exist_ok=True)
 
                 # Mask TIFF (uint16, compatible with ImageJ/FIJI)
                 skio.imsave(
@@ -229,10 +242,44 @@ def run_segmentation_task(
             except Exception as e:
                 print(f"[CellQuant] Warning: output save failed for {base_name}: {e}")
 
+            # Nuclear segmentation preview
+            if nuclear_seg_engine and nuclear_suffix:
+                nuc_path = channels.get(nuclear_suffix) or channels.get(nuclear_suffix.upper())
+                if nuc_path:
+                    try:
+                        nuc_img = load_image(nuc_path)
+                        nuc_result = nuclear_seg_engine.segment_single(
+                            normalize_image(nuc_img),
+                            diameter=0,
+                            flow_threshold=params.flow_threshold,
+                            cellprob_threshold=params.cellprob_threshold,
+                        )
+                        nuclear_masks = nuc_result.masks
+                        # Save nuclear masks
+                        nuc_mask_path = session.get_nuclear_mask_path(cond_name, base_name)
+                        np.save(nuc_mask_path, nuclear_masks)
+                        # Save nuclear overlays
+                        nuc_uint8 = imagej_auto_contrast(nuc_img.astype(np.float64))
+                        from PIL import Image as PILImage
+                        nuc_outline = _create_outline_overlay(nuc_uint8, nuclear_masks)
+                        PILImage.fromarray(nuc_outline, "RGB").save(
+                            image_set_dir / f"{base_name}_nuclear_outline.png"
+                        )
+                        nuc_filled = _create_simple_overlay(nuc_uint8, nuclear_masks, alpha=0.5)
+                        PILImage.fromarray(nuc_filled, "RGB").save(
+                            image_set_dir / f"{base_name}_nuclear_filled.jpg"
+                        )
+                        print(f"[CellQuant]   -> Nuclear: {nuc_result.n_cells} nuclei")
+                        task.progress_data = {"has_nuclear": True}
+                    except Exception as e:
+                        print(f"[CellQuant] Warning: nuclear seg failed for {base_name}: {e}")
+
             processed += 1
 
     for eng in engine_cache.values():
         eng.clear_gpu_memory()
+    if nuclear_seg_engine:
+        nuclear_seg_engine.clear_gpu_memory()
     return {"total_cells": total_cells, "images_processed": processed}
 
 
@@ -346,6 +393,29 @@ def run_quantification_task(
                     loaded_count += 1
         if loaded_count > 0:
             print(f"[CellQuant] Loaded {loaded_count} masks from disk")
+
+    # ── Nuclear engine for mito correction ───────────────────────────────
+    # If any mitochondrial markers are flagged, run a second Cellpose pass
+    # using the 'nuclei' model on the DAPI/nuclear channel per image set,
+    # then subtract that nuclear signal from the whole-cell CTCF.
+    nuclear_engine = None
+    nuclear_suffix_global = (
+        (session.channel_config or {}).get("nuclear_suffix")
+        or next(
+            (cond.get("nuclear_suffix") for cond in session.conditions.values() if cond.get("nuclear_suffix")),
+            None,
+        )
+    )
+    if mitochondrial_markers and nuclear_suffix_global:
+        from cellquant.core.segmentation.cellpose_engine import CellposeEngine
+        use_gpu = quant_params.get("use_gpu", False)
+        print(
+            f"[CellQuant] Initializing nuclear engine for mito correction "
+            f"(model=nuclei, gpu={use_gpu}, nuclear_channel={nuclear_suffix_global})"
+        )
+        nuclear_engine = CellposeEngine(model_type="nuclei", use_gpu=use_gpu)
+    elif mitochondrial_markers:
+        print("[CellQuant] Warning: mitochondrial markers flagged but no nuclear channel configured — skipping nuclear subtraction")
 
     total = sum(len(masks) for masks in session.masks.values())
     task.total = total
@@ -465,6 +535,30 @@ def run_quantification_task(
                     f"{bg_vs_cell}"
                 )
 
+            # ── Stage 3b: Nuclear segmentation for mito correction ───────
+            nuclear_masks_for_quant = None
+            if nuclear_engine is not None:
+                nuc_path = channels.get(nuclear_suffix_global) or channels.get(nuclear_suffix_global.upper())
+                if nuc_path:
+                    from cellquant.core.io.image_loader import normalize_image
+                    nuc_img = load_image(nuc_path)
+                    if has_preprocessing:
+                        nuc_img = correct_image(nuc_img, pp_config)
+                    nuc_result = nuclear_engine.segment_single(
+                        normalize_image(nuc_img),
+                        diameter=0,  # auto-detect nuclear diameter
+                    )
+                    nuclear_masks_for_quant = nuc_result.masks
+                    print(
+                        f"[CellQuant] Nuclear seg {cond_name}/{base_name}: "
+                        f"{nuc_result.n_cells} nuclei detected"
+                    )
+                else:
+                    print(
+                        f"[CellQuant] Warning: nuclear channel '{nuclear_suffix_global}' not found "
+                        f"in {cond_name}/{base_name} — mito correction skipped for this image"
+                    )
+
             # ── Stage 4: Enhanced CTCF ────────────────────────────
             results = quantify_multiple_markers(
                 marker_images=marker_images,
@@ -473,6 +567,7 @@ def run_quantification_task(
                 per_cell_backgrounds_map=per_cell_bgs if per_cell_bgs else None,
                 background_stds=bg_stds,
                 mitochondrial_markers=mitochondrial_markers,
+                nuclear_masks=nuclear_masks_for_quant,
             )
 
             df = results_to_dataframe(
@@ -486,6 +581,9 @@ def run_quantification_task(
                 all_dfs.append(df)
 
             processed += 1
+
+    if nuclear_engine is not None:
+        nuclear_engine.clear_gpu_memory()
 
     if all_dfs:
         combined = pd.concat(all_dfs, ignore_index=True)
