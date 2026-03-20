@@ -51,6 +51,7 @@ export async function browseFolder(): Promise<string | null> {
 	return res.path;
 }
 
+
 export interface DirEntry {
 	name: string;
 	path: string;

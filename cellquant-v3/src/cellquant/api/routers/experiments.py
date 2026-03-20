@@ -36,6 +36,35 @@ def _wavelength_to_color(nm: float) -> str:
     return "#FF4444"           # red (Cy5 ~670nm, mCherry ~610nm, Alexa647)
 
 
+_NAME_TO_COLOR: dict[str, str] = {
+    # Nuclear / UV
+    "dapi": "#4488FF", "hoechst": "#4488FF", "nuclear": "#4488FF", "nuc": "#4488FF",
+    # Green
+    "gfp": "#00CC44", "egfp": "#00CC44", "fitc": "#00CC44", "alexa488": "#00CC44", "488": "#00CC44",
+    # Yellow/orange
+    "yfp": "#FFD700", "cfp": "#7B2FBE",
+    # Orange/red (Cy3, mRFP, TRITC)
+    "cy3": "#FF6600", "tritc": "#FF6600", "555": "#FF6600", "561": "#FF6600",
+    "mrfp": "#FF6600", "rfp": "#FF6600", "mcherry": "#FF6600", "cherry": "#FF6600",
+    # Far red
+    "cy5": "#FF4444", "alexa647": "#FF4444", "647": "#FF4444",
+    # Brightfield / transmitted
+    "bf": "#FFFFFF", "brightfield": "#FFFFFF", "dic": "#FFFFFF", "phase": "#FFFFFF", "tl": "#FFFFFF",
+}
+
+def _color_from_name(suffix: str) -> str | None:
+    """Infer fluorescence color from channel name keywords."""
+    lower = suffix.lower()
+    # Check whole name first
+    if lower in _NAME_TO_COLOR:
+        return _NAME_TO_COLOR[lower]
+    # Check individual words (handles "DAPI Imaging", "GFP Imaging", etc.)
+    for word in lower.split():
+        if word in _NAME_TO_COLOR:
+            return _NAME_TO_COLOR[word]
+    return None
+
+
 def _extract_wavelengths(image_sets: dict, first_n: int = 1) -> dict[str, float]:
     """Extract emission wavelengths from TIFF metadata for each channel suffix.
 
@@ -91,15 +120,10 @@ async def browse_folder() -> dict:
             if path:
                 result["path"] = path
         except Exception:
-            # No display available (remote user) — return None so frontend
-            # can fall back to the web-based folder picker
             result["path"] = None
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _open_dialog)
-
-    if not result["path"]:
-        return {"path": None}
     return {"path": result["path"]}
 
 
@@ -166,7 +190,7 @@ async def scan_experiment(req: ScanRequest):
     if req.output_path:
         output_dir = Path(req.output_path)
     else:
-        output_dir = folder.parent / "CellQuant_Output"
+        output_dir = folder.parent / f"{folder.name}_output"
 
     manager = get_session_manager()
     session = manager.create_session(output_dir=output_dir)
@@ -240,6 +264,14 @@ async def scan_experiment(req: ScanRequest):
         # Extract wavelengths from TIFF metadata
         wavelengths = _extract_wavelengths(image_sets_raw)
         channel_colors = {s: _wavelength_to_color(w) for s, w in wavelengths.items()}
+
+        # For any suffix without wavelength metadata, infer color from name
+        all_suffixes = first_cond.get("channel_suffixes", [])
+        for suffix in all_suffixes:
+            if suffix not in channel_colors:
+                inferred = _color_from_name(suffix)
+                if inferred:
+                    channel_colors[suffix] = inferred
 
         det_response = DetectionResult(
             channel_suffixes=first_cond.get("channel_suffixes", []),

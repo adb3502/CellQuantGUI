@@ -11,6 +11,8 @@ class ConditionOverride(BaseModel):
     cellprob_threshold: Optional[float] = None
     min_size: Optional[int] = None
     segmentation_suffixes: Optional[List[str]] = None
+    model_type: Optional[str] = None
+    pre_smooth_sigma: Optional[float] = None
 
 
 class SegmentationRequest(BaseModel):

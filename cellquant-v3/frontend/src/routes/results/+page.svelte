@@ -11,7 +11,7 @@
 		CLEAN_CONFIG, INTERACTIVE_CONFIG, VIRIDIS,
 	} from '$components/charts/chart-theme';
 
-	type TabId = 'table' | 'distribution' | 'scatter' | 'spatial' | 'qcsummary' | 'perfov';
+	type TabId = 'table' | 'distribution' | 'scatter' | 'spatial' | 'background' | 'qcsummary' | 'perfov';
 	let activeTab = $state<TabId>('table');
 	let loading = $state(false);
 	let showFlagged = $state(true);
@@ -49,6 +49,16 @@
 	let ctcfColumnsFromTable = $derived(tableColumns.filter(c => c.endsWith('_CTCF')));
 	let effectiveCtcfColumns = $derived(ctcfColumns.length > 0 ? ctcfColumns : ctcfColumnsFromTable);
 
+	// Background columns
+	let bgColumns = $derived(chartColumns.filter(c => c.endsWith('_Background')));
+	let selectedBgCol = $state('');
+	let activeBgCol = $derived(selectedBgCol && bgColumns.includes(selectedBgCol)
+		? selectedBgCol
+		: bgColumns[0] || '');
+	// Selector for background spatial: which metric to use
+	type BgView = 'distribution' | 'spatial';
+	let bgView = $state<BgView>('distribution');
+
 	// Detect quality flag columns (table view)
 	let flagColumns = $derived(tableColumns.filter(c =>
 		c.startsWith('is_outlier_') || c === 'is_saturated' || c === 'is_dim' || c === 'low_confidence_background'
@@ -62,6 +72,7 @@
 		{ id: 'distribution', label: 'Distribution' },
 		{ id: 'scatter', label: 'Scatter' },
 		{ id: 'spatial', label: 'Spatial Map' },
+		{ id: 'background', label: 'Background' },
 		{ id: 'qcsummary', label: 'QC Summary' },
 		{ id: 'perfov', label: 'Per-FOV' },
 	];
@@ -181,6 +192,8 @@
 			renderScatter(Plotly, layout, theme, ctcfCol, condCol, conditions);
 		} else if (tab === 'spatial') {
 			renderSpatial(Plotly, layout, theme, ctcfCol);
+		} else if (tab === 'background') {
+			renderBackground(Plotly, layout, theme, condCol, conditions);
 		} else if (tab === 'perfov') {
 			renderPerFov(Plotly, layout, theme);
 		}
@@ -345,6 +358,85 @@
 		}, INTERACTIVE_CONFIG);
 	}
 
+	function renderBackground(Plotly: any, layout: any, theme: any, condCol: string, conditions: string[]) {
+		const bgCol = activeBgCol;
+		if (!bgCol) return;
+
+		if (bgView === 'distribution') {
+			const traces = conditions.map((cond, i) => {
+				const vals = chartRows
+					.filter(r => String(r[condCol]) === cond)
+					.map(r => Number(r[bgCol]) || 0);
+				const color = getColor(i, palette);
+				return {
+					type: 'violin',
+					name: cond,
+					x: vals.map(() => cond),
+					y: vals,
+					width: 0.6,
+					spanmode: 'soft',
+					box: { visible: true },
+					meanline: { visible: true },
+					points: showPoints ? 'all' : false,
+					marker: { color, size: 3, opacity: 0.5 },
+					line: { color, width: 1.5 },
+					fillcolor: color + '33',
+					hovertemplate: `<b>${cond}</b><br>Background: %{y:.2f}<extra></extra>`,
+				};
+			});
+
+			Plotly.newPlot('plotly-background', traces, {
+				...layout,
+				margin: { l: 60, r: 20, t: 20, b: 80 },
+				yaxis: {
+					...(layout.yaxis as object),
+					title: { text: bgCol, font: { size: 12, color: theme.textMuted } },
+					rangemode: 'nonnegative',
+				},
+				violingap: 0.35,
+				violingroupgap: 0.15,
+			}, CLEAN_CONFIG);
+
+		} else {
+			// Spatial map colored by background
+			const hasXY = chartColumns.includes('x_centroid') && chartColumns.includes('y_centroid');
+			if (!hasXY) return;
+
+			const bgValues = chartRows.map(r => Number(r[bgCol]) || 0);
+			const trace = {
+				x: chartRows.map(r => Number(r['x_centroid']) || 0),
+				y: chartRows.map(r => Number(r['y_centroid']) || 0),
+				mode: 'markers',
+				type: 'scattergl',
+				marker: {
+					color: bgValues,
+					colorscale: 'RdYlBu',
+					reversescale: true,
+					size: 5,
+					opacity: 0.85,
+					colorbar: {
+						title: { text: 'Background', font: { size: 11, color: theme.textMuted } },
+						thickness: 14,
+						len: 0.6,
+						tickfont: { size: 10, color: theme.textMuted },
+						outlinewidth: 0,
+					},
+				},
+				text: chartRows.map(r => `Cell ${r['CellID']}<br>${String(r[condCol] ?? '')}`),
+				hovertemplate: `<b>%{text}</b><br>x: %{x:.0f}, y: %{y:.0f}<br>Background: %{marker.color:.2f}<extra></extra>`,
+				showlegend: false,
+			};
+
+			Plotly.newPlot('plotly-background', [trace], {
+				...layout,
+				margin: { l: 60, r: 20, t: 20, b: 60 },
+				xaxis: { ...(layout.xaxis as object), title: { text: 'X (px)', font: { size: 12, color: theme.textMuted } }, scaleanchor: 'y' },
+				yaxis: { ...(layout.yaxis as object), title: { text: 'Y (px)', font: { size: 12, color: theme.textMuted } }, autorange: 'reversed' },
+				showlegend: false,
+			}, INTERACTIVE_CONFIG);
+		}
+	}
+
 	function renderPerFov(Plotly: any, layout: any, theme: any) {
 		if (fovRows.length === 0) return;
 
@@ -385,6 +477,8 @@
 	$effect(() => {
 		const _tab = activeTab;
 		const _col = activeCtcfCol;
+		const _bgCol = activeBgCol;
+		const _bgView = bgView;
 		const _len = chartRows.length;
 		const _dist = distType;
 		const _pal = palette;
@@ -465,6 +559,29 @@
 					<input type="checkbox" bind:checked={showGrid} />
 					<Grid3x3 size={13} />
 				</label>
+			{/if}
+
+			{#if activeTab === 'background' && bgColumns.length > 1}
+				<span class="toolbar-sep"></span>
+				<select class="toolbar-select font-ui" bind:value={selectedBgCol}>
+					{#each bgColumns as col}
+						<option value={col}>{col.replace('_Background', '')}</option>
+					{/each}
+				</select>
+			{/if}
+
+			{#if activeTab === 'background'}
+				<span class="toolbar-sep"></span>
+				<div class="chart-type-toggle">
+					<button class="toggle-btn font-ui" class:active={bgView === 'distribution'} onclick={() => bgView = 'distribution'}>Distribution</button>
+					<button class="toggle-btn font-ui" class:active={bgView === 'spatial'} onclick={() => bgView = 'spatial'}>Spatial</button>
+				</div>
+				{#if bgView === 'distribution'}
+					<label class="toolbar-check font-ui">
+						<input type="checkbox" bind:checked={showPoints} />
+						Points
+					</label>
+				{/if}
 			{/if}
 
 			{#if activeTab === 'distribution'}
@@ -598,7 +715,22 @@
 				{/snippet}
 			</ChartCard>
 
-		{:else if activeTab === 'qcsummary'}
+		{:else if activeTab === 'background'}
+		<ChartCard
+			title="Background: {activeBgCol || 'No background data'}"
+			subtitle={bgView === 'distribution'
+				? 'Per-cell background values by condition'
+				: 'Spatial distribution of background values (RdYlBu: blue = low, red = high)'}
+			loading={chartLoading}
+			empty={(chartRows.length === 0 && !chartLoading) || bgColumns.length === 0}
+			emptyMessage={bgColumns.length === 0 ? 'No background columns found — run quantification first' : 'Run quantification to see background data'}
+		>
+			{#snippet children()}
+				<div class="chart-plot" id="plotly-background"></div>
+			{/snippet}
+		</ChartCard>
+
+	{:else if activeTab === 'qcsummary'}
 			<div class="table-container">
 				{#if summaryRows.length > 0}
 					<table class="results-table">

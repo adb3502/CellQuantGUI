@@ -712,6 +712,33 @@
 													min_size: v ? Number(v) : undefined
 												}};
 											}} />
+										<label class="field-label font-ui" title="Override Cellpose model for this condition">Model</label>
+										<select class="field-input field-sm font-mono"
+											value={$conditionOverrides[condName]?.model_type ?? ''}
+											onchange={(e) => {
+												const v = e.currentTarget.value;
+												$conditionOverrides = {...$conditionOverrides, [condName]: {
+													...$conditionOverrides[condName],
+													model_type: v || undefined
+												}};
+											}}>
+											<option value="">Global ({$segParams.model_type})</option>
+											<option value="cpsam">Cellpose-SAM</option>
+											<option value="cyto3">Cyto3</option>
+											<option value="cyto2">Cyto2</option>
+											<option value="nuclei">Nuclei</option>
+										</select>
+										<label class="field-label font-ui" title="Gaussian pre-blur sigma — fills in hollow/ring-shaped nuclei (0 = off)">Pre-blur σ</label>
+										<input type="number" class="field-input field-sm font-mono" step="0.5" min="0"
+											value={$conditionOverrides[condName]?.pre_smooth_sigma ?? ''}
+											placeholder="0"
+											onchange={(e) => {
+												const v = e.currentTarget.value;
+												$conditionOverrides = {...$conditionOverrides, [condName]: {
+													...$conditionOverrides[condName],
+													pre_smooth_sigma: v ? Number(v) : undefined
+												}};
+											}} />
 									</div>
 								{/if}
 							</div>

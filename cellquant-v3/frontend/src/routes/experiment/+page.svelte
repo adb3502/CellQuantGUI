@@ -5,7 +5,6 @@
 		Palette
 	} from 'lucide-svelte';
 	import { browseFolder, scanExperiment, configureChannels, setOutputPath, renderUrl } from '$api/client';
-	import FolderPicker from '$components/ui/FolderPicker.svelte';
 	import type { ChannelRole, ConditionInfo } from '$api/types';
 	import { DEFAULT_CHANNEL_COLORS } from '$api/types';
 	import { sessionId } from '$stores/session';
@@ -24,8 +23,6 @@
 	let browsing = $state(false);
 	let browsingOutput = $state(false);
 	let error = $state('');
-	let folderPickerOpen = $state(false);
-	let folderPickerTarget = $state<'experiment' | 'output'>('experiment');
 
 	// Expandable conditions
 	let expandedConditions = $state<Set<string>>(new Set());
@@ -143,16 +140,12 @@
 			if (path) {
 				folderPath = path;
 				await handleScan();
-				browsing = false;
-				return;
 			}
 		} catch {
-			// Native dialog failed
+			error = 'Could not open folder dialog';
+		} finally {
+			browsing = false;
 		}
-		browsing = false;
-		// Fall back to web-based folder picker
-		folderPickerTarget = 'experiment';
-		folderPickerOpen = true;
 	}
 
 	async function handleBrowseOutput() {
@@ -163,25 +156,11 @@
 				outPath = path;
 				$outputPath = path;
 				if ($sessionId) await setOutputPath($sessionId, path);
-				browsingOutput = false;
-				return;
 			}
 		} catch {
-			// Native dialog failed
-		}
-		browsingOutput = false;
-		folderPickerTarget = 'output';
-		folderPickerOpen = true;
-	}
-
-	async function handleFolderPicked(path: string) {
-		if (folderPickerTarget === 'experiment') {
-			folderPath = path;
-			await handleScan();
-		} else {
-			outPath = path;
-			$outputPath = path;
-			if ($sessionId) await setOutputPath($sessionId, path);
+			// ignore
+		} finally {
+			browsingOutput = false;
 		}
 	}
 
@@ -191,7 +170,8 @@
 		error = '';
 		try {
 			// Compute output path before scan so backend creates it
-			const defaultOutput = folderPath.replace(/[\\/][^\\/]+$/, '') + '/CellQuant_Output';
+			const folderName = folderPath.replace(/.*[\\/]/, '');
+			const defaultOutput = folderPath.replace(/[\\/][^\\/]+$/, '') + '/' + folderName + '_output';
 			const result = await scanExperiment(folderPath, defaultOutput);
 			$sessionId = result.session_id;
 			$conditions = result.conditions;
@@ -660,12 +640,6 @@
 		</div>
 	</div>
 </div>
-
-<FolderPicker
-	bind:open={folderPickerOpen}
-	title={folderPickerTarget === 'experiment' ? 'Select Experiment Folder' : 'Select Output Directory'}
-	onSelect={handleFolderPicked}
-/>
 
 <style>
 	.page-experiment {

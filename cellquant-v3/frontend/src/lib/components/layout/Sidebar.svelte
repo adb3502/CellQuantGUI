@@ -10,6 +10,7 @@
 		BarChart3,
 		ScrollText,
 		Brain,
+		Layers,
 		PanelLeftClose,
 		PanelLeftOpen
 	} from 'lucide-svelte';
@@ -22,6 +23,7 @@
 		{ href: '/training', label: 'Training', icon: Brain },
 		{ href: '/quantification', label: 'Quantification', icon: Calculator },
 		{ href: '/results', label: 'Results', icon: BarChart3 },
+		{ href: '/heatmap', label: 'Heatmaps', icon: Layers },
 		{ href: '/logs', label: 'Logs', icon: ScrollText }
 	];
 

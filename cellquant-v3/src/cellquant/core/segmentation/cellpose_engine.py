@@ -136,6 +136,7 @@ class CellposeEngine:
         image: np.ndarray,
         diameter: float = 30.0,
         flow_threshold: float = 0.4,
+        cellprob_threshold: float = 0.0,
         min_size: int = 15,
         channels: Optional[List[int]] = None
     ) -> SegmentationResult:
@@ -163,6 +164,7 @@ class CellposeEngine:
             image,
             diameter=diameter if diameter and diameter > 0 else None,
             flow_threshold=flow_threshold,
+            cellprob_threshold=cellprob_threshold,
             min_size=min_size,
             channels=channels
         )
@@ -404,7 +406,11 @@ def _create_outline_overlay(
         (masks != padded[1:-1, 2:])      # right
     ) & (masks > 0)
 
-    # Draw red outlines
+    # Dilate outlines to 2px so they survive JPEG compression and remain visible
+    # on bright backgrounds (single-pixel red lines get washed out by DCT blocks)
+    outlines = binary_dilation(outlines)
+
+    # Draw red outlines — dim the background slightly to make outlines pop
     overlay[outlines, 0] = 255
     overlay[outlines, 1] = 0
     overlay[outlines, 2] = 0

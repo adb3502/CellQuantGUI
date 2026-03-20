@@ -52,6 +52,9 @@ def run_segmentation_task(
     processed = 0
     total_cells = 0
 
+    # Cache engines by model_type to avoid reloading identical models
+    engine_cache: dict = {params.model_type: engine}
+
     for cond_name, cond_data in session.conditions.items():
         if task.status == "cancelled":
             break
@@ -66,6 +69,18 @@ def run_segmentation_task(
         cond_flow = cond_overrides.get("flow_threshold", params.flow_threshold)
         cond_cellprob = cond_overrides.get("cellprob_threshold", params.cellprob_threshold)
         cond_min_size = cond_overrides.get("min_size", params.min_size)
+        cond_pre_smooth = cond_overrides.get("pre_smooth_sigma") or 0
+
+        # Per-condition model type (lazy-loads new engine if different from global)
+        cond_model = cond_overrides.get("model_type") or params.model_type
+        if cond_model not in engine_cache:
+            print(f"[CellQuant] Loading per-condition model '{cond_model}' for {cond_name}")
+            engine_cache[cond_model] = CellposeEngine(
+                model_type=cond_model,
+                use_gpu=params.use_gpu,
+                batch_size=params.batch_size,
+            )
+        active_engine = engine_cache[cond_model]
 
         # User-selected segmentation channels (per-condition or global)
         seg_suffixes = cond_overrides.get("segmentation_suffixes") or seg_params.get("segmentation_suffixes")
@@ -134,11 +149,24 @@ def run_segmentation_task(
                     nuc_img = load_image(nuc_path)
                     seg_input = normalize_image(nuc_img)
 
-            print(f"[CellQuant] Segmenting {cond_name}/{base_name} ...")
-            result = engine.segment_single(
+            # Pre-smoothing: Gaussian blur fills in hollow/ring-shaped nuclei
+            if cond_pre_smooth and cond_pre_smooth > 0:
+                from scipy.ndimage import gaussian_filter
+                if seg_input.ndim == 2:
+                    seg_input = gaussian_filter(seg_input.astype(np.float32), sigma=cond_pre_smooth)
+                else:
+                    seg_input = np.stack(
+                        [gaussian_filter(seg_input[i].astype(np.float32), sigma=cond_pre_smooth)
+                         for i in range(seg_input.shape[0])], axis=0
+                    )
+                print(f"[CellQuant]   -> pre-smoothed with sigma={cond_pre_smooth}")
+
+            print(f"[CellQuant] Segmenting {cond_name}/{base_name} (model={cond_model})...")
+            result = active_engine.segment_single(
                 seg_input,
                 diameter=cond_diameter,
                 flow_threshold=cond_flow,
+                cellprob_threshold=cond_cellprob,
                 min_size=cond_min_size,
                 channels=params.channels,
             )
@@ -203,7 +231,8 @@ def run_segmentation_task(
 
             processed += 1
 
-    engine.clear_gpu_memory()
+    for eng in engine_cache.values():
+        eng.clear_gpu_memory()
     return {"total_cells": total_cells, "images_processed": processed}
 
 

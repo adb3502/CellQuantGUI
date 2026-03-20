@@ -19,7 +19,7 @@ import re
 KNOWN_CHANNEL_NAMES = {
     "dapi", "hoechst", "nuclear", "nuc",
     "gfp", "egfp", "fitc", "alexa488", "488",
-    "rfp", "mcherry", "cherry", "tritc", "cy3", "alexa555", "555", "561",
+    "rfp", "mrfp", "mcherry", "cherry", "tritc", "cy3", "alexa555", "555", "561",
     "cy5", "alexa647", "647",
     "bf", "brightfield", "dic", "phase", "tl",
     "cfp", "yfp", "bfp",
@@ -56,8 +56,8 @@ def _strip_tiff_ext(name: str) -> str:
 
 
 def _tokenize(stem: str) -> List[str]:
-    """Split filename stem by underscores, filtering empty tokens."""
-    return [t for t in stem.split("_") if t]
+    """Split filename stem by underscores or hyphens, filtering empty tokens."""
+    return [t.strip() for t in re.split(r'[_-]', stem) if t.strip()]
 
 
 def _is_channel_like(value: str) -> float:
@@ -72,6 +72,16 @@ def _is_channel_like(value: str) -> float:
     # Known channel names → definitive
     if v in KNOWN_CHANNEL_NAMES:
         return 1.0
+
+    # Multi-word token: check if any individual word is a known channel name
+    # (handles "DAPI Imaging", "GFP Channel", "CY5 Imaging", etc.)
+    words = v.split()
+    if len(words) > 1:
+        for word in words:
+            if word in KNOWN_CHANNEL_NAMES:
+                return 0.95
+        # Check regex patterns on first word
+        v = words[0]
 
     # Common channel prefixes: w, c, ch followed by 1 digit
     # (w1, w2, C0, C1, ch1, ch2)

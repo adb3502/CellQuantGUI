@@ -153,7 +153,9 @@ async def render_mask_overlay(
     bg_key = bg if bg else "default"
     cache_dir = session.directory / "renders" / condition / base_name
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"mask_{style}_{bg_key}_{size}.jpg"
+    # Outlines are saved as PNG (lossless) — JPEG destroys 1-px red lines via DCT compression
+    cache_ext = "png" if style == "outline" else "jpg"
+    cache_path = cache_dir / f"mask_{style}_{bg_key}_{size}.{cache_ext}"
 
     if not cache_path.exists():
         if bg:
@@ -180,11 +182,15 @@ async def render_mask_overlay(
         pil_img = Image.fromarray(overlay, mode="RGB")
         if max(pil_img.size) > size:
             pil_img.thumbnail((size, size), Image.LANCZOS)
-        pil_img.save(cache_path, "JPEG", quality=90)
+        if style == "outline":
+            pil_img.save(cache_path, "PNG")
+        else:
+            pil_img.save(cache_path, "JPEG", quality=90)
 
+    media_type = "image/png" if style == "outline" else "image/jpeg"
     return FileResponse(
         cache_path,
-        media_type="image/jpeg",
+        media_type=media_type,
         headers={"Cache-Control": "public, max-age=60"},
     )
 
