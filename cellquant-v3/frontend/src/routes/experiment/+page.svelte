@@ -4,10 +4,11 @@
 		Eye, EyeOff, ChevronLeft, ChevronRightIcon, X, XCircle, Undo2,
 		Palette
 	} from 'lucide-svelte';
-	import { browseFolder, scanExperiment, configureChannels, setOutputPath, renderUrl } from '$api/client';
+	import { scanExperiment, configureChannels, setOutputPath, renderUrl } from '$api/client';
 	import type { ChannelRole, ConditionInfo } from '$api/types';
 	import { DEFAULT_CHANNEL_COLORS } from '$api/types';
 	import { sessionId } from '$stores/session';
+	import FolderPicker from '$components/ui/FolderPicker.svelte';
 	import {
 		conditions, detection, experimentPath, outputPath,
 		totalImages, channelSuffixes, excludedConditions, markerNames,
@@ -20,8 +21,9 @@
 	let folderPath = $state($experimentPath ?? '');
 	let outPath = $state($outputPath ?? '');
 	let scanning = $state(false);
-	let browsing = $state(false);
-	let browsingOutput = $state(false);
+	let pickerOpen = $state(false);
+	let pickerTarget = $state<'input' | 'output'>('input');
+	let pickerTitle = $state('');
 	let error = $state('');
 
 	// Expandable conditions
@@ -132,35 +134,26 @@
 	}
 
 	// ── Actions ──
-	async function handleBrowse() {
-		browsing = true;
-		error = '';
-		try {
-			const path = await browseFolder();
-			if (path) {
-				folderPath = path;
-				await handleScan();
-			}
-		} catch {
-			error = 'Could not open folder dialog';
-		} finally {
-			browsing = false;
-		}
+	function handleBrowse() {
+		pickerTarget = 'input';
+		pickerTitle = 'Select Experiment Folder';
+		pickerOpen = true;
 	}
 
-	async function handleBrowseOutput() {
-		browsingOutput = true;
-		try {
-			const path = await browseFolder();
-			if (path) {
-				outPath = path;
-				$outputPath = path;
-				if ($sessionId) await setOutputPath($sessionId, path);
-			}
-		} catch {
-			// ignore
-		} finally {
-			browsingOutput = false;
+	function handleBrowseOutput() {
+		pickerTarget = 'output';
+		pickerTitle = 'Select Output Folder';
+		pickerOpen = true;
+	}
+
+	async function handlePickerSelect(path: string) {
+		if (pickerTarget === 'input') {
+			folderPath = path;
+			await handleScan();
+		} else {
+			outPath = path;
+			$outputPath = path;
+			if ($sessionId) await setOutputPath($sessionId, path);
 		}
 	}
 
@@ -362,6 +355,8 @@
 	}
 </script>
 
+<FolderPicker bind:open={pickerOpen} title={pickerTitle} onSelect={handlePickerSelect} />
+
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="page-experiment">
@@ -379,8 +374,8 @@
 							class="folder-input font-ui"
 							onkeydown={(e) => e.key === 'Enter' && handleScan()} />
 					</div>
-					<button class="btn btn-secondary font-ui" onclick={handleBrowse} disabled={browsing || scanning}>
-						{browsing || scanning ? '...' : 'Browse'}
+					<button class="btn btn-secondary font-ui" onclick={handleBrowse} disabled={scanning}>
+						{scanning ? '...' : 'Browse'}
 					</button>
 				</div>
 				{#if error}
@@ -396,8 +391,8 @@
 								class="folder-input font-ui"
 								onchange={async () => { $outputPath = outPath; if ($sessionId) await setOutputPath($sessionId, outPath); }} />
 						</div>
-						<button class="btn btn-secondary font-ui" onclick={handleBrowseOutput} disabled={browsingOutput}>
-							{browsingOutput ? '...' : 'Browse'}
+						<button class="btn btn-secondary font-ui" onclick={handleBrowseOutput} >
+							Browse
 						</button>
 					</div>
 				{/if}

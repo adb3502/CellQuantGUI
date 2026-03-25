@@ -1,15 +1,19 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
 	import { Calculator, Play, RotateCcw, ChevronDown, ChevronRight, Filter, Beaker } from 'lucide-svelte';
-	import { runQuantification, configurePreprocessing, browseFolder } from '$api/client';
+	import { runQuantification, configurePreprocessing } from '$api/client';
 	import { ProgressSocket } from '$api/websocket';
 	import type { ProgressMessage, QCFilterParams } from '$api/types';
 	import { sessionId } from '$stores/session';
 	import { detection } from '$stores/experiment';
 	import { quantTaskId } from '$stores/quantification';
 	import TaskStatus from '$components/progress/TaskStatus.svelte';
+	import FolderPicker from '$components/ui/FolderPicker.svelte';
 
 	let bgMethod = $state('auto');
+	let pickerOpen = $state(false);
+	let pickerTarget = $state<'dark' | 'flat'>('dark');
+	let pickerTitle = $state('');
 	let running = $state(false);
 	let wsProgress = $state(0);
 	let wsMessage = $state('');
@@ -136,18 +140,25 @@
 		wsResult = null;
 	}
 
-	async function browseDark() {
-		const path = await browseFolder();
-		if (path && $sessionId) {
+	function browseDark() {
+		pickerTarget = 'dark';
+		pickerTitle = 'Select Dark Frame Folder';
+		pickerOpen = true;
+	}
+
+	function browseFlat() {
+		pickerTarget = 'flat';
+		pickerTitle = 'Select Flat Field Folder';
+		pickerOpen = true;
+	}
+
+	async function handlePickerSelect(path: string) {
+		if (!$sessionId) return;
+		if (pickerTarget === 'dark') {
 			const res = await configurePreprocessing($sessionId, [path], []);
 			hasDark = res.has_dark;
 			ppWarnings = res.warnings;
-		}
-	}
-
-	async function browseFlat() {
-		const path = await browseFolder();
-		if (path && $sessionId) {
+		} else {
 			const res = await configurePreprocessing($sessionId, [], [path]);
 			hasFlat = res.has_flat;
 			ppWarnings = res.warnings;
@@ -158,6 +169,8 @@
 		disconnectWebSocket();
 	});
 </script>
+
+<FolderPicker bind:open={pickerOpen} title={pickerTitle} onSelect={handlePickerSelect} />
 
 <div class="page-quantification">
 	<div class="two-col">
