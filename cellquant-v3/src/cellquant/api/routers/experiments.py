@@ -157,15 +157,14 @@ async def browse_folder(
     import httpx
 
     username = current_user.username.lower()
-    candidate_urls: list[str] = []
     registered_port = _picker_registry.get(username)
-    candidate_ports = [p for p in [registered_port, 7861] if p]
+    if not registered_port:
+        return {"path": None, "error": "picker_not_running"}
 
-    for host in ("127.0.0.1", "localhost", "host.docker.internal"):
-        for port in candidate_ports:
-            url = f"http://{host}:{port}/pick"
-            if url not in candidate_urls:
-                candidate_urls.append(url)
+    candidate_urls = [
+        f"http://127.0.0.1:{registered_port}/pick",
+        f"http://localhost:{registered_port}/pick",
+    ]
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         for url in candidate_urls:

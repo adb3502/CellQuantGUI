@@ -30,8 +30,8 @@ except ImportError:
     sys.exit(1)
 
 
-DEFAULT_PORT = 7861
-BACKEND_URL = os.environ.get("CELLQUANT_BACKEND", "http://localhost:8000")
+DEFAULT_PORT = 0  # 0 = auto-assign a free port
+BACKEND_URL = os.environ.get("CELLQUANT_BACKEND", "http://localhost:7860")
 
 
 def pick_folder() -> str | None:
@@ -100,13 +100,14 @@ def main():
     BACKEND_URL = args.backend
 
     server = HTTPServer(("127.0.0.1", args.port), PickerHandler)
-    print(f"CellQuant picker agent listening on port {args.port}")
+    actual_port = server.server_address[1]  # resolved port when args.port==0
+    print(f"CellQuant picker agent listening on port {actual_port} (user: {args.username})")
     print("Keep this window open while using CellQuant. Press Ctrl+C to stop.")
 
     # Register in background so we don't block startup
     t = threading.Thread(
         target=register_with_backend,
-        args=(args.port, args.username),
+        args=(actual_port, args.username),
         daemon=True,
     )
     t.start()

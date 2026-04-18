@@ -198,7 +198,16 @@ export async function deleteProject(id: number): Promise<void> {
 // ── Experiments ──────────────────────────────────────────
 
 export async function browseFolder(): Promise<string | null> {
-	const res = await request<{ path: string | null }>('/experiments/browse', { method: 'POST' });
+	const res = await request<{ path: string | null; error?: string }>('/experiments/browse', { method: 'POST' });
+	if (res.error === 'picker_not_running') {
+		alert(
+			'The CellQuant folder picker is not running in your Windows session.\n\n' +
+			'Please run this once after logging in:\n\n' +
+			'  D:\\Users\\adb\\dev\\lab-tools\\CellQuantGUI\\cellquant-v3\\cellquant-picker.py\n\n' +
+			'Or type the folder path directly into the text box.'
+		);
+		return null;
+	}
 	return res.path;
 }
 
