@@ -1,7 +1,6 @@
 @echo off
 :: CellQuant Picker — Per-user auto-start installer
-:: No admin rights needed. Adds a shortcut to the user's Startup folder
-:: so the picker launches silently at every login.
+:: No admin rights needed.
 
 setlocal
 
@@ -17,8 +16,9 @@ if not exist "%PYTHONW%" (
     exit /b 1
 )
 
-:: Create a .lnk shortcut in the user's Startup folder via PowerShell
-powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%SHORTCUT%'); $s.TargetPath = '%PYTHONW%'; $s.Arguments = '\"%PICKER%\" --backend %BACKEND%'; $s.WindowStyle = 7; $s.Save()"
+set /p CQUSER="Enter your CellQuant username (the one you log into the app with): "
+
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%SHORTCUT%'); $s.TargetPath = '%PYTHONW%'; $s.Arguments = '\"%PICKER%\" --backend %BACKEND% --username %CQUSER%'; $s.WindowStyle = 7; $s.Save()"
 
 if not exist "%SHORTCUT%" (
     echo ERROR: Could not create startup shortcut.
@@ -26,8 +26,8 @@ if not exist "%SHORTCUT%" (
     exit /b 1
 )
 
-echo Installed for: %USERNAME%
+echo Installed for CellQuant user: %CQUSER%
 echo Starting picker now...
-start "" "%PYTHONW%" "%PICKER%" --backend %BACKEND%
-echo Done. Folder picker will auto-start at every login.
+start "" "%PYTHONW%" "%PICKER%" --backend %BACKEND% --username %CQUSER%
+echo Done.
 timeout /t 3 >nul

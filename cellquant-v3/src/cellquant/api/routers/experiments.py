@@ -161,22 +161,16 @@ async def browse_folder(
     if not registered_port:
         return {"path": None, "error": "picker_not_running"}
 
-    candidate_urls = [
-        f"http://127.0.0.1:{registered_port}/pick",
-        f"http://localhost:{registered_port}/pick",
-    ]
-
     async with httpx.AsyncClient(timeout=120.0) as client:
-        for url in candidate_urls:
+        for host in ("127.0.0.1", "localhost"):
             try:
-                resp = await client.post(url)
+                resp = await client.post(f"http://{host}:{registered_port}/pick")
                 resp.raise_for_status()
-                data = resp.json()
-                return {"path": data.get("path")}
+                return {"path": resp.json().get("path")}
             except Exception:
                 continue
 
-    return {"path": None}
+    return {"path": None, "error": "picker_not_running"}
 
 
 @router.post("/list-dir")
