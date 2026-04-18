@@ -20,6 +20,7 @@ from cellquant.core.io.image_loader import (
 )
 from cellquant.core.io.mask_io import load_mask, save_mask
 from cellquant.core.io.roi_export import save_rois_imagej
+from cellquant.core.preprocessing.correction import PreprocessingConfig, correct_image
 from cellquant.core.segmentation.cellpose_engine import (
     CellposeEngine, SegmentationParams, SegmentationResult
 )
@@ -27,6 +28,9 @@ from cellquant.core.quantification.ctcf import (
     calculate_ctcf_vectorized, quantify_multiple_markers, results_to_dataframe
 )
 from cellquant.core.quantification.background import estimate_background
+from cellquant.core.quantification.qc_filters import QCFilterConfig, apply_qc_filters
+from cellquant.core.quantification.outliers import flag_outliers_in_dataframe
+from cellquant.core.quantification.jc1 import JC1Config, add_jc1_ratio_column
 
 
 @dataclass
@@ -38,6 +42,7 @@ class ChannelConfig:
     marker_names: List[str] = field(default_factory=lambda: ["Marker1"])
     mitochondrial_markers: List[str] = field(default_factory=list)
     segmentation_channels: List[str] = field(default_factory=lambda: ["nuclear", "cyto"])
+    jc1_config: Optional[JC1Config] = None
 
 
 @dataclass
@@ -89,7 +94,9 @@ class BatchPipeline:
         self,
         n_workers: int = 4,
         use_gpu: bool = True,
-        batch_size: int = 4
+        batch_size: int = 4,
+        preprocessing: Optional[PreprocessingConfig] = None,
+        qc_filters: Optional[QCFilterConfig] = None,
     ):
         """
         Initialize the pipeline.
@@ -98,10 +105,18 @@ class BatchPipeline:
             n_workers: Number of parallel workers for CPU operations
             use_gpu: Whether to use GPU for segmentation
             batch_size: Batch size for GPU segmentation
+            preprocessing: Optional flat-field / dark-current correction config.
+                Applied to all channels before segmentation and measurement.
+                When None, raw images are used as-is.
+            qc_filters: Post-segmentation quality filters (border removal,
+                solidity, eccentricity, circularity). Defaults to border
+                removal only (safe default; other filters opt-in via thresholds).
         """
         self.n_workers = n_workers
         self.use_gpu = use_gpu
         self.batch_size = batch_size
+        self.preprocessing = preprocessing or PreprocessingConfig()
+        self.qc_filters = qc_filters or QCFilterConfig(remove_border_objects=True)
         self._cancel_flag = threading.Event()
         self._engine = None
 
@@ -308,19 +323,27 @@ class BatchPipeline:
             print(f"  Warning: No nuclear channel for {base_name}")
             return None
 
+        # ── 1. Load raw images ────────────────────────────────────────
         nuclear_img = load_image(nuclear_path)
-        nuclear_norm = normalize_image(nuclear_img)
-
         cyto_img = load_image(cyto_path) if cyto_path else None
+
+        # ── 2. Flat-field / dark-current correction ───────────────────
+        # Applied to ALL channels before any further processing.
+        # Segmentation channels are corrected then normalized (for Cellpose).
+        # Marker channels are corrected and kept as raw float for measurement.
+        nuclear_img = correct_image(nuclear_img, self.preprocessing)
+        if cyto_img is not None:
+            cyto_img = correct_image(cyto_img, self.preprocessing)
+
+        nuclear_norm = normalize_image(nuclear_img)
         cyto_norm = normalize_image(cyto_img) if cyto_img is not None else None
 
-        # Stack channels for segmentation
         if cyto_norm is not None:
             seg_input = np.stack([nuclear_norm, cyto_norm], axis=0)
         else:
             seg_input = nuclear_norm
 
-        # Run segmentation
+        # ── 3. Segmentation ───────────────────────────────────────────
         result = self.engine.segment_single(
             seg_input,
             diameter=seg_params.diameter,
@@ -334,40 +357,55 @@ class BatchPipeline:
             print(f"  Warning: No cells detected in {base_name}")
             return None
 
-        # Save outputs
+        # ── 4. Post-segmentation QC filters ───────────────────────────
+        # Returns filtered masks, morphology table, and rejection counts.
+        masks, morphology, rejection_counts = apply_qc_filters(masks, self.qc_filters)
+        if rejection_counts.get("total_rejected", 0) > 0:
+            print(
+                f"  QC: kept {rejection_counts['total_kept']} / "
+                f"{rejection_counts['total_kept'] + rejection_counts['total_rejected']} "
+                f"cells in {base_name} "
+                f"(border={rejection_counts.get('border', 0)}, "
+                f"solidity={rejection_counts.get('solidity', 0)}, "
+                f"eccentricity={rejection_counts.get('eccentricity', 0)})"
+            )
+
+        if masks.max() == 0:
+            print(f"  Warning: All cells filtered out in {base_name}")
+            return None
+
+        # ── 5. Save intermediate outputs ──────────────────────────────
         if save_outputs:
             set_output = output_folder / base_name
             set_output.mkdir(parents=True, exist_ok=True)
 
-            # Save masks
             save_mask(masks, set_output / f"{base_name}_masks.tif")
 
-            # Save overlay
             overlay = CellposeEngine.create_overlay(seg_input, masks)
-            from skimage import io
-            io.imsave(str(set_output / f"{base_name}_overlay.png"), overlay)
+            from skimage import io as skio
+            skio.imsave(str(set_output / f"{base_name}_overlay.png"), overlay)
 
-            # Save ROIs
             save_rois_imagej(masks, set_output / f"{base_name}_rois.zip")
 
-        # Load marker images and quantify
+        # ── 6. Load marker images (corrected raw, NOT normalized) ─────
         marker_images = {}
         for suffix, name in zip(config.marker_suffixes, config.marker_names):
             marker_path = image_paths.get(suffix.upper())
             if marker_path:
-                marker_images[name] = load_image(marker_path)
+                raw = load_image(marker_path)
+                marker_images[name] = correct_image(raw, self.preprocessing)
 
         if not marker_images:
             print(f"  Warning: No marker channels for {base_name}")
             return None
 
-        # Estimate backgrounds
+        # ── 7. Background estimation (auto-selects method per image) ──
         backgrounds = {
-            name: estimate_background(img, masks).global_value
+            name: estimate_background(img, masks, method="auto").global_value
             for name, img in marker_images.items()
         }
 
-        # Quantify all markers (parallel)
+        # ── 8. Quantify all markers ───────────────────────────────────
         results = quantify_multiple_markers(
             marker_images=marker_images,
             masks=masks,
@@ -377,13 +415,30 @@ class BatchPipeline:
             n_workers=self.n_workers
         )
 
-        # Convert to DataFrame
+        # ── 9. Build per-cell DataFrame ───────────────────────────────
         df = results_to_dataframe(
             results=results,
             condition=condition.name,
             image_set=base_name,
             segmentation_type="cellular"
         )
+
+        # ── 10. Append morphology columns ─────────────────────────────
+        # Needed by the heatmap and spatial plot routes in the frontend.
+        if morphology is not None and len(morphology.labels) == len(df):
+            df["centroid_y"] = morphology.centroids_y
+            df["centroid_x"] = morphology.centroids_x
+            df["solidity"] = morphology.solidities
+            df["eccentricity"] = morphology.eccentricities
+            df["circularity"] = morphology.circularities
+            df["is_border"] = morphology.is_border
+
+        # ── 11. Outlier flags (per condition, MAD-based) ──────────────
+        df = flag_outliers_in_dataframe(df)
+
+        # ── 12. JC-1 ratio (optional) ─────────────────────────────────
+        if config.jc1_config is not None:
+            df = add_jc1_ratio_column(df, config.jc1_config)
 
         return df
 
@@ -524,20 +579,21 @@ class BatchPipeline:
 
                 image_paths = condition.image_sets.get(base_name, {})
 
-                # Load marker images
+                # Load marker images (apply preprocessing correction)
                 marker_images = {}
                 for suffix, name in zip(config.marker_suffixes, config.marker_names):
                     marker_path = image_paths.get(suffix.upper())
                     if marker_path:
-                        marker_images[name] = load_image(marker_path)
+                        raw = load_image(marker_path)
+                        marker_images[name] = correct_image(raw, self.preprocessing)
 
                 if not marker_images:
                     processed += 1
                     continue
 
-                # Estimate backgrounds
+                # Background (auto-select method)
                 backgrounds = {
-                    name: estimate_background(img, masks).global_value
+                    name: estimate_background(img, masks, method="auto").global_value
                     for name, img in marker_images.items()
                 }
 
@@ -556,6 +612,11 @@ class BatchPipeline:
                     condition=condition.name,
                     image_set=base_name
                 )
+
+                df = flag_outliers_in_dataframe(df)
+
+                if config.jc1_config is not None:
+                    df = add_jc1_ratio_column(df, config.jc1_config)
 
                 if len(df) > 0:
                     all_results.append(df)

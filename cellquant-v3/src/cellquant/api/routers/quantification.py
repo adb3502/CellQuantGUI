@@ -31,9 +31,11 @@ async def start_quantification(req: QuantificationRequest):
         "marker_names": req.marker_names,
         "mitochondrial_markers": req.mitochondrial_markers,
         "qc_filters": req.qc_filters.model_dump(),
+        "jc1": req.jc1.model_dump() if req.jc1.enabled else None,
         "negative_control_path": req.negative_control_path,
         "manual_background_value": req.manual_background_value,
         "outlier_threshold": req.outlier_threshold,
+        "use_gpu": req.use_gpu,
     }
 
     task_id = queue.submit(
@@ -179,6 +181,52 @@ async def get_qc_summary(session_id: str):
     )
 
 
+@router.get("/heatmap-range/{session_id}")
+async def get_heatmap_range(
+    session_id: str,
+    channel: str = Query(...),
+    metric: str = Query(default="mean"),
+    conditions: list[str] = Query(default=[]),
+    image_sets: list[str] = Query(default=[]),
+):
+    """
+    Return the global vmin/vmax across the given (condition, image_set) pairs
+    for a channel+metric. Used to synchronise colour scale across paired images.
+    conditions and image_sets must be the same length (parallel lists).
+    """
+    session = get_session(session_id)
+    if session.results_df is None:
+        session.load_results()
+    if session.results_df is None:
+        raise HTTPException(404, "No quantification results")
+
+    col_map = {
+        "mean": f"{channel}_MeanIntensity",
+        "ctcf": f"{channel}_CTCF",
+        "background": f"{channel}_Background",
+    }
+    col = col_map.get(metric, f"{channel}_MeanIntensity")
+    df = session.results_df
+
+    all_vals: list[float] = []
+    pairs = list(zip(conditions, image_sets)) if conditions and image_sets else []
+    if not pairs:
+        # No pairs specified — return global range for the column
+        if col in df.columns:
+            v = df[col].dropna().astype(float).values
+            all_vals = v.tolist()
+    else:
+        for cond, iset in pairs:
+            subset = df[(df["Condition"] == cond) & (df["ImageSet"] == iset)]
+            if col in subset.columns:
+                all_vals.extend(subset[col].dropna().astype(float).tolist())
+
+    if not all_vals:
+        raise HTTPException(404, f"No values for column {col}")
+
+    return {"vmin": float(min(all_vals)), "vmax": float(max(all_vals))}
+
+
 @router.get("/heatmap-image/{session_id}")
 async def get_heatmap_image(
     session_id: str,
@@ -186,6 +234,8 @@ async def get_heatmap_image(
     image_set: str = Query(...),
     channel: str = Query(...),
     metric: str = Query(default="mean"),  # mean | ctcf | background
+    vmin: float | None = Query(default=None),
+    vmax: float | None = Query(default=None),
 ):
     """
     Render a PNG heatmap where each cell mask region is filled with a
@@ -194,6 +244,8 @@ async def get_heatmap_image(
     metric=mean       → per-cell mean intensity (viridis)
     metric=ctcf       → CTCF value (viridis)
     metric=background → per-cell background used (RdYlBu)
+
+    vmin/vmax: if provided, fix the colour scale (for paired comparisons).
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -260,11 +312,12 @@ async def get_heatmap_image(
     if len(valid_vals) == 0:
         raise HTTPException(404, "No valid cell values to render")
 
-    vmin, vmax = float(valid_vals.min()), float(valid_vals.max())
-    if vmax == vmin:
-        vmax = vmin + 1.0
+    _vmin = vmin if vmin is not None else float(valid_vals.min())
+    _vmax = vmax if vmax is not None else float(valid_vals.max())
+    if _vmax == _vmin:
+        _vmax = _vmin + 1.0
 
-    norm = Normalize(vmin=vmin, vmax=vmax)
+    norm = Normalize(vmin=_vmin, vmax=_vmax)
     cmap_name = "RdYlBu_r" if metric == "background" else "viridis"
     cmap = cm.get_cmap(cmap_name)
 
@@ -284,8 +337,8 @@ async def get_heatmap_image(
         media_type="image/png",
         headers={
             "Cache-Control": "no-cache",
-            "X-Vmin": str(round(vmin, 4)),
-            "X-Vmax": str(round(vmax, 4)),
+            "X-Vmin": str(round(_vmin, 4)),
+            "X-Vmax": str(round(_vmax, 4)),
         },
     )
 

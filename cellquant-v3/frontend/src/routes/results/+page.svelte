@@ -6,8 +6,9 @@
 	import { resultsPage, quantSummary, qcSummary } from '$stores/quantification';
 	import ChartCard from '$components/charts/ChartCard.svelte';
 	import {
-		COLOR_PALETTES, type PaletteId, getColor,
-		getChartTheme, baseLayout, computeKDE, removeOutliersIQR,
+		type ChartType, COLOR_PALETTES, type PaletteId, getColor,
+		getChartTheme, baseLayout, computeKDE, removeOutliersIQR, computeKwPair,
+		deterministicJitter, buildDensityScales,
 		CLEAN_CONFIG, INTERACTIVE_CONFIG, VIRIDIS,
 	} from '$components/charts/chart-theme';
 
@@ -19,8 +20,7 @@
 	let selectedCtcfCol = $state('');
 
 	// Chart options
-	type DistType = 'violin' | 'box' | 'density';
-	let distType = $state<DistType>('violin');
+	let distType = $state<ChartType>('violin');
 	let palette = $state<PaletteId>('default');
 	let showOutliers = $state(false);
 	let showPoints = $state(false);
@@ -187,6 +187,147 @@
 		return col.startsWith('is_outlier_') || col === 'is_saturated' || col === 'is_dim';
 	}
 
+	type DistributionGroup = { label: string; values: number[]; n: number; xPos: number; color: string };
+
+	function buildDistributionGroups(
+		valueForCondition: (cond: string) => number[],
+		conditions: string[],
+	): DistributionGroup[] {
+		return conditions.map((cond, i) => {
+			const values = valueForCondition(cond);
+			return {
+				label: cond,
+				values,
+				n: values.length,
+				xPos: i,
+				color: getColor(i, palette),
+			};
+		}).filter((g) => g.values.length > 0);
+	}
+
+	function buildDistributionAnnotations(groups: DistributionGroup[], yLabel: string) {
+		if (groups.length !== 2) return [];
+		const theme = getChartTheme();
+		const pair = computeKwPair(groups[0].values, groups[1].values);
+		const nPairs = (groups.length * (groups.length - 1)) / 2;
+		const pAdj = Math.min(1, pair.pRaw * nPairs);
+		const label = `KW p=${pAdj.toExponential(2)}, ε²=${pair.eps.toFixed(2)}`;
+		const maxY = Math.max(...groups.flatMap((g) => g.values));
+		const y = maxY * 1.08 || 1;
+		return [
+			{
+				xref: 'x',
+				yref: 'y',
+				x: (groups[0].xPos + groups[1].xPos) / 2,
+				y,
+				text: label,
+				showarrow: false,
+				font: { size: 11, color: theme.textMuted },
+			},
+			{
+				xref: 'x',
+				yref: 'y',
+				axref: 'x',
+				ayref: 'y',
+				x: groups[0].xPos,
+				y,
+				ax: groups[1].xPos,
+				ay: y,
+				showarrow: false,
+				line: { color: theme.textMuted, width: 1 },
+			},
+		];
+	}
+
+	function buildDistributionTraces(groups: DistributionGroup[], chartType: ChartType, yLabel: string) {
+		const shapeTraces: any[] = [];
+		const pointTraces: any[] = [];
+
+		groups.forEach((g, groupIndex) => {
+			const densityScales = buildDensityScales(g.values);
+			const isHalfViolin = chartType === 'half-violin';
+			const pointOffset = isHalfViolin ? -0.15 : 0;
+			const pointSpread = isHalfViolin ? 0.15 : 0.3;
+
+			if (chartType === 'violin' || chartType === 'half-violin') {
+				shapeTraces.push({
+					type: 'violin',
+					name: g.label,
+					x: g.values.map(() => g.xPos),
+					y: g.values,
+					scalegroup: g.label,
+					width: isHalfViolin ? 0.55 : 0.6,
+					side: isHalfViolin ? 'positive' : undefined,
+					box: { visible: true },
+					meanline: { visible: true },
+					points: false,
+					marker: { color: g.color, size: 4, opacity: 0.7 },
+					line: { color: g.color },
+					fillcolor: `${g.color}33`,
+					hovertemplate: `<b>${g.label}</b><br>N: ${g.n}<extra></extra>`,
+				});
+			} else if (chartType === 'box') {
+				shapeTraces.push({
+					type: 'box',
+					name: g.label,
+					x: g.values.map(() => g.xPos),
+					y: g.values,
+					width: 0.5,
+					boxpoints: false,
+					marker: { color: g.color, size: 4, opacity: 0.7 },
+					line: { color: g.color, width: 1.5 },
+					fillcolor: `${g.color}33`,
+					hovertemplate: `<b>${g.label}</b><br>N: ${g.n}<extra></extra>`,
+				});
+			} else if (chartType === 'density') {
+				const kde = computeKDE(g.values);
+				if (kde.x.length > 0) {
+					shapeTraces.push({
+						type: 'scatter',
+						mode: 'lines',
+						name: g.label,
+						x: kde.x,
+						y: kde.y,
+						fill: 'tozeroy',
+						line: { color: g.color, width: 2 },
+						fillcolor: `${g.color}22`,
+						hovertemplate: `<b>${g.label}</b><br>${yLabel}: %{x:.3f}<br>Density: %{y:.4f}<extra></extra>`,
+					});
+				}
+			} else if (chartType === 'histogram') {
+				shapeTraces.push({
+					type: 'histogram',
+					name: g.label,
+					x: g.values,
+					opacity: 0.7,
+					marker: { color: g.color },
+					hovertemplate: `<b>${g.label}</b><br>${yLabel}: %{x:.3f}<br>Count: %{y}<extra></extra>`,
+				});
+			}
+
+			if (showPoints && (chartType === 'violin' || chartType === 'half-violin' || chartType === 'box')) {
+				pointTraces.push({
+					type: 'scatter',
+					mode: 'markers',
+					name: `${g.label} points`,
+					showlegend: false,
+					x: g.values.map((_, pointIndex) =>
+						g.xPos + deterministicJitter(pointIndex, groupIndex, pointOffset, pointSpread, densityScales[pointIndex] ?? 1)
+					),
+					y: g.values,
+					marker: {
+						color: g.color,
+						size: 4,
+						opacity: 0.55,
+					},
+					hovertemplate: `<b>${g.label}</b><br>${yLabel}: %{y:.3f}<extra></extra>`,
+				});
+			}
+		});
+
+		return [...shapeTraces, ...pointTraces];
+	}
+
 	// ── Chart rendering ──────────────────────────────────
 
 	async function renderChart(tab: string) {
@@ -220,98 +361,44 @@
 	}
 
 	function renderDistribution(Plotly: any, layout: any, theme: any, ctcfCol: string, condCol: string, conditions: string[]) {
-		const traces: any[] = [];
 		const yLabel = logScale
-			? (distType === 'density' ? 'Density' : `log₁₀(${ctcfCol} + 1)`)
-			: (distType === 'density' ? 'Density' : ctcfCol);
-
-		conditions.forEach((cond, i) => {
+			? (distType === 'density' || distType === 'histogram' ? `log₁₀(${ctcfCol} + 1)` : `log₁₀(${ctcfCol} + 1)`)
+			: ctcfCol;
+		const groups = buildDistributionGroups((cond) => {
 			let vals = chartRows.filter((r) => String(r[condCol]) === cond).map((r) => Number(r[ctcfCol]) || 0);
-			if (!showOutliers) {
-				vals = removeOutliersIQR(vals).filtered;
-			}
-			if (excludeZeros) {
-				vals = vals.filter(v => v > 0);
-			}
-			// Log transform: log10(x + 1) — safe for zero values
-			if (logScale && distType !== 'density') {
-				vals = vals.map(v => Math.log10(Math.max(0, v) + 1));
-			}
-			const color = getColor(i, palette);
-
-			if (distType === 'violin') {
-				traces.push({
-					type: 'violin',
-					name: cond,
-					x: vals.map(() => cond),
-					y: vals,
-					width: 0.6,
-					scalegroup: cond,
-					spanmode: 'soft',
-					box: { visible: true },
-					meanline: { visible: true },
-					points: showPoints ? 'all' : false,
-					marker: { color, size: 3, opacity: 0.6 },
-					line: { color, width: 1.5 },
-					fillcolor: color + '33',
-					hovertemplate: `<b>${cond}</b><br>%{y:.1f}<extra></extra>`,
-				});
-			} else if (distType === 'box') {
-				traces.push({
-					type: 'box',
-					name: cond,
-					x: vals.map(() => cond),
-					y: vals,
-					width: 0.5,
-					boxpoints: showPoints ? 'all' : 'outliers',
-					jitter: 0.4,
-					pointpos: 0,
-					marker: { color, size: 3, opacity: 0.6 },
-					line: { color, width: 1.5 },
-					fillcolor: color + '33',
-					hovertemplate: `<b>${cond}</b><br>%{y:.1f}<extra></extra>`,
-				});
-			} else if (distType === 'density') {
-				// For density, apply log to raw values before KDE
-				const kdeVals = logScale ? vals.map(v => Math.log10(Math.max(0, v) + 1)) : vals;
-				const kde = computeKDE(kdeVals);
-				if (kde.x.length > 0) {
-					traces.push({
-						type: 'scatter',
-						mode: 'lines',
-						name: cond,
-						x: kde.x,
-						y: kde.y,
-						fill: 'tozeroy',
-						line: { color, width: 2 },
-						fillcolor: color + '22',
-						hovertemplate: `<b>${cond}</b><br>${logScale ? 'log₁₀(' + ctcfCol + '+1)' : ctcfCol}: %{x:.1f}<br>Density: %{y:.4f}<extra></extra>`,
-					});
-				}
-			}
-		});
+			if (!showOutliers) vals = removeOutliersIQR(vals).filtered;
+			if (excludeZeros) vals = vals.filter((v) => v > 0);
+			if (logScale) vals = vals.map((v) => Math.log10(Math.max(0, v) + 1));
+			return vals;
+		}, conditions);
+		const traces = buildDistributionTraces(groups, distType, yLabel);
 
 		const distLayout = {
 			...layout,
 			margin: { l: 60, r: 20, t: 20, b: 80 },
 			yaxis: {
 				...(layout.yaxis as object),
-				title: { text: yLabel, font: { size: 12, color: theme.textMuted } },
-				rangemode: (distType !== 'density' && !logScale) ? 'nonnegative' as const : undefined,
+				title: { text: distType === 'density' ? 'Density' : yLabel, font: { size: 12, color: theme.textMuted } },
+				rangemode: (distType !== 'density' && distType !== 'histogram' && !logScale) ? 'nonnegative' as const : undefined,
 			},
 			xaxis: {
 				...(layout.xaxis as object),
-				title: distType === 'density'
-					? { text: logScale ? `log₁₀(${ctcfCol} + 1)` : ctcfCol, font: { size: 12, color: theme.textMuted } }
-					: '',
+				title: distType === 'density' || distType === 'histogram'
+					? { text: yLabel, font: { size: 12, color: theme.textMuted } }
+					: undefined,
+				tickvals: groups.map((g) => g.xPos),
+				ticktext: groups.map((g) => g.label),
+				range: distType === 'density' || distType === 'histogram' ? undefined : [-0.6, groups.length - 0.4],
 			},
+			barmode: distType === 'histogram' ? 'overlay' : undefined,
+			annotations: buildDistributionAnnotations(groups, yLabel),
 			violingap: 0.35,
 			violingroupgap: 0.15,
 			boxgap: 0.3,
 			boxgroupgap: 0.15,
 		};
 
-		Plotly.newPlot('plotly-distribution', traces, distLayout, CLEAN_CONFIG);
+		Plotly.newPlot('plotly-distribution', traces, distLayout, distType === 'histogram' ? INTERACTIVE_CONFIG : CLEAN_CONFIG);
 	}
 
 	function renderScatter(Plotly: any, layout: any, theme: any, ctcfCol: string, condCol: string, conditions: string[]) {
@@ -498,10 +585,8 @@
 		const greenCol = jc1GreenActive;
 		if (!redCol || !greenCol || redCol === greenCol) return;
 
-		const traces: any[] = [];
 		const yLabel = logScale ? 'log₁₀(Red/Green + 1)' : 'Red / Green ratio';
-
-		conditions.forEach((cond, i) => {
+		const groups: DistributionGroup[] = conditions.map((cond, i) => {
 			const condRows = chartRows.filter(r => String(r[condCol]) === cond);
 			let ratios = condRows
 				.filter(r => (Number(r[greenCol]) || 0) > 0)
@@ -509,57 +594,30 @@
 			if (!showOutliers) ratios = removeOutliersIQR(ratios).filtered;
 			if (excludeZeros) ratios = ratios.filter(v => v > 0);
 			const vals = logScale ? ratios.map(v => Math.log10(Math.max(0, v) + 1)) : ratios;
-			const color = getColor(i, palette);
+			return { label: cond, values: vals, n: vals.length, xPos: i, color: getColor(i, palette) };
+		}).filter((g) => g.values.length > 0);
+		const distTraces = buildDistributionTraces(groups, distType, yLabel);
 
-			if (distType === 'violin') {
-				traces.push({
-					type: 'violin', name: cond,
-					x: vals.map(() => cond), y: vals,
-					width: 0.6, spanmode: 'soft',
-					box: { visible: true }, meanline: { visible: true },
-					points: showPoints ? 'all' : false,
-					marker: { color, size: 3, opacity: 0.6 },
-					line: { color, width: 1.5 }, fillcolor: color + '33',
-					hovertemplate: '<b>' + cond + '</b><br>Ratio: %{y:.3f}<extra></extra>',
-				});
-			} else if (distType === 'box') {
-				traces.push({
-					type: 'box', name: cond,
-					x: vals.map(() => cond), y: vals,
-					width: 0.5, boxpoints: showPoints ? 'all' : 'outliers',
-					jitter: 0.4, pointpos: 0,
-					marker: { color, size: 3, opacity: 0.6 },
-					line: { color, width: 1.5 }, fillcolor: color + '33',
-					hovertemplate: '<b>' + cond + '</b><br>Ratio: %{y:.3f}<extra></extra>',
-				});
-			} else {
-				const kde = computeKDE(vals);
-				if (kde.x.length > 0) {
-					traces.push({
-						type: 'scatter', mode: 'lines', name: cond,
-						x: kde.x, y: kde.y, fill: 'tozeroy',
-						line: { color, width: 2 }, fillcolor: color + '22',
-						hovertemplate: '<b>' + cond + '</b><br>Ratio: %{x:.3f}<br>Density: %{y:.4f}<extra></extra>',
-					});
-				}
-			}
-		});
-
-		Plotly.newPlot('plotly-jc1', traces, {
+		Plotly.newPlot('plotly-jc1', distTraces, {
 			...layout,
 			margin: { l: 60, r: 20, t: 20, b: 80 },
 			yaxis: {
 				...(layout.yaxis as object),
 				title: { text: distType === 'density' ? 'Density' : yLabel, font: { size: 12, color: theme.textMuted } },
-				rangemode: distType !== 'density' ? 'nonnegative' as const : undefined,
+				rangemode: distType !== 'density' && distType !== 'histogram' ? 'nonnegative' as const : undefined,
 			},
 			xaxis: {
 				...(layout.xaxis as object),
-				title: distType === 'density' ? { text: yLabel, font: { size: 12, color: theme.textMuted } } : '',
+				title: distType === 'density' || distType === 'histogram' ? { text: yLabel, font: { size: 12, color: theme.textMuted } } : undefined,
+				tickvals: groups.map((g) => g.xPos),
+				ticktext: groups.map((g) => g.label),
+				range: distType === 'density' || distType === 'histogram' ? undefined : [-0.6, groups.length - 0.4],
 			},
+			barmode: distType === 'histogram' ? 'overlay' : undefined,
+			annotations: buildDistributionAnnotations(groups, yLabel),
 			violingap: 0.35, violingroupgap: 0.15,
 			boxgap: 0.3, boxgroupgap: 0.15,
-		}, CLEAN_CONFIG);
+		}, distType === 'histogram' ? INTERACTIVE_CONFIG : CLEAN_CONFIG);
 	}
 
 	// Re-render when tab, data, options, or marker changes
@@ -683,15 +741,17 @@
 				<span class="toolbar-sep"></span>
 				<div class="chart-type-toggle">
 					<button class="toggle-btn font-ui" class:active={distType === 'violin'} onclick={() => distType = 'violin'}>Violin</button>
+					<button class="toggle-btn font-ui" class:active={distType === 'half-violin'} onclick={() => distType = 'half-violin'}>Half</button>
 					<button class="toggle-btn font-ui" class:active={distType === 'box'} onclick={() => distType = 'box'}>Box</button>
 					<button class="toggle-btn font-ui" class:active={distType === 'density'} onclick={() => distType = 'density'}>Density</button>
+					<button class="toggle-btn font-ui" class:active={distType === 'histogram'} onclick={() => distType = 'histogram'}>Hist</button>
 				</div>
 				<span class="toolbar-sep"></span>
 				<label class="toolbar-check font-ui">
 					<input type="checkbox" bind:checked={showOutliers} />
 					Outliers
 				</label>
-				{#if distType !== 'density'}
+				{#if distType !== 'density' && distType !== 'histogram'}
 					<label class="toolbar-check font-ui">
 						<input type="checkbox" bind:checked={showPoints} />
 						Points

@@ -56,8 +56,8 @@ def _strip_tiff_ext(name: str) -> str:
 
 
 def _tokenize(stem: str) -> List[str]:
-    """Split filename stem by underscores or hyphens, filtering empty tokens."""
-    return [t.strip() for t in re.split(r'[_-]', stem) if t.strip()]
+    """Split filename stem by underscores, hyphens, or spaces, filtering empty tokens."""
+    return [t.strip() for t in re.split(r'[_\- ]+', stem) if t.strip()]
 
 
 def _is_channel_like(value: str) -> float:
@@ -167,6 +167,40 @@ def _channel_score(values: Set[str], cardinality: int, freq: int,
     return score
 
 
+_SINGLE_CH_SUFFIX = "img"
+
+
+def _each_file_own_set(files: List[Path]) -> "ImageSetDetection":
+    """Treat each file as an independent single-channel image set.
+
+    Used when files have no shared base name + channel structure (e.g. "Capture 1.tif",
+    "Capture 2.tif" are each a separate field of view, not channels of the same image).
+    All image sets get the same generic channel suffix "img" so the channel config
+    table in the UI shows a single consistent row.
+    """
+    image_sets = {}
+    for f in files:
+        stem = _strip_tiff_ext(f.name)
+        image_sets[stem] = {_SINGLE_CH_SUFFIX: f}
+    channel_suffixes = [_SINGLE_CH_SUFFIX]
+    roles = suggest_channel_roles(channel_suffixes)
+    return ImageSetDetection(
+        channel_suffixes=channel_suffixes,
+        n_channels=1,
+        n_image_sets=len(image_sets),
+        n_complete=len(image_sets),
+        n_incomplete=0,
+        n_orphan_files=0,
+        image_sets=image_sets,
+        incomplete_info={},
+        orphan_files=[],
+        confidence=1.0,
+        suggested_nuclear=roles.get("nuclear"),
+        suggested_cyto=roles.get("cyto"),
+        suggested_markers=roles.get("markers", []),
+    )
+
+
 def detect_image_sets(tiff_files: List[Path]) -> ImageSetDetection:
     """
     Auto-detect image sets and channels from a list of TIFF files.
@@ -210,13 +244,8 @@ def detect_image_sets(tiff_files: List[Path]) -> ImageSetDetection:
             file_tokens.append((f, tokens))
 
     if not file_tokens:
-        # All files are unparseable
-        return ImageSetDetection(
-            channel_suffixes=[], n_channels=0, n_image_sets=len(tiff_files),
-            n_complete=0, n_incomplete=0, n_orphan_files=len(tiff_files),
-            image_sets={}, incomplete_info={},
-            orphan_files=list(tiff_files), confidence=0.0,
-        )
+        # All files are single-token (no separator) — each is its own image set
+        return _each_file_own_set(tiff_files)
 
     # ─── Phase 2: Group by token count ────────────────────────────
     # Files with different token counts likely have different naming schemes.
@@ -294,6 +323,15 @@ def detect_image_sets(tiff_files: List[Path]) -> ImageSetDetection:
         if base_name not in image_sets:
             image_sets[base_name] = {}
         image_sets[base_name][channel_value] = f
+
+    # If every "channel" value is unique across all sets (i.e., cardinality ==
+    # total files), the "channel" token is actually a field-of-view index, not a
+    # real channel. Treat each file as an independent single-channel image set.
+    all_channel_values = best["values"]
+    if len(all_channel_values) == total_in_group and all(
+        re.match(r'^\d+$', v) for v in all_channel_values
+    ):
+        return _each_file_own_set([f for f, _ in main_group] + orphans)
 
     # ─── Phase 6: Classify completeness ───────────────────────────
     channel_set = set(channel_suffixes)
