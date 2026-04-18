@@ -32,9 +32,15 @@ class ApiError extends Error {
 	}
 }
 
+function authHeaders(): Record<string, string> {
+	if (typeof localStorage === 'undefined') return {};
+	const token = localStorage.getItem('cellquant_token');
+	return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`${BASE}${path}`, {
-		headers: { 'Content-Type': 'application/json', ...init?.headers },
+		headers: { 'Content-Type': 'application/json', ...authHeaders(), ...init?.headers },
 		...init
 	});
 	if (!res.ok) {
@@ -44,10 +50,164 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	return res.json();
 }
 
+// ── Auth ─────────────────────────────────────────────────
+
+export interface LoginResult {
+	access_token: string;
+	token_type: string;
+	username: string;
+	role: string;
+}
+
+export async function login(username: string, password: string): Promise<LoginResult> {
+	return request('/auth/login', {
+		method: 'POST',
+		body: JSON.stringify({ username, password })
+	});
+}
+
+export async function logout(): Promise<void> {
+	await request('/auth/logout', { method: 'POST' });
+}
+
+export interface UserProfile {
+	id: number;
+	username: string;
+	email: string;
+	role: string;
+	is_active: boolean;
+}
+
+export async function getMe(): Promise<UserProfile> {
+	return request('/auth/me');
+}
+
+export async function registerUser(
+	username: string,
+	email: string,
+	password: string,
+	role: string = 'user'
+): Promise<UserProfile> {
+	return request('/auth/register', {
+		method: 'POST',
+		body: JSON.stringify({ username, email, password, role })
+	});
+}
+
+// ── Admin ─────────────────────────────────────────────────
+
+export interface AdminUser {
+	id: number;
+	username: string;
+	email: string;
+	role: string;
+	is_active: boolean;
+	created_at: string;
+	last_login: string | null;
+}
+
+export async function adminListUsers(): Promise<AdminUser[]> {
+	return request('/admin/users');
+}
+
+export async function adminPatchUser(
+	userId: number,
+	patch: { role?: string; is_active?: boolean }
+): Promise<AdminUser> {
+	return request(`/admin/users/${userId}`, {
+		method: 'PATCH',
+		body: JSON.stringify(patch)
+	});
+}
+
+export async function adminDeleteUser(userId: number): Promise<void> {
+	await request(`/admin/users/${userId}`, { method: 'DELETE' });
+}
+
+export interface ActivityRow {
+	id: number;
+	user_id: number;
+	username: string;
+	action: string;
+	resource: string;
+	detail_json: string;
+	ip_address: string;
+	timestamp: string;
+}
+
+export interface ActivityPage {
+	total: number;
+	page: number;
+	per_page: number;
+	data: ActivityRow[];
+}
+
+export async function adminGetActivity(
+	opts: { user_id?: number; action?: string; page?: number; per_page?: number } = {}
+): Promise<ActivityPage> {
+	const params = new URLSearchParams();
+	if (opts.user_id != null) params.set('user_id', String(opts.user_id));
+	if (opts.action) params.set('action', opts.action);
+	if (opts.page != null) params.set('page', String(opts.page));
+	if (opts.per_page != null) params.set('per_page', String(opts.per_page));
+	return request(`/admin/activity?${params}`);
+}
+
+// ── Projects ──────────────────────────────────────────────
+
+export interface Project {
+	id: number;
+	name: string;
+	description: string;
+	folder_path: string;
+	settings: Record<string, unknown>;
+	created_at: string;
+	updated_at: string;
+}
+
+export async function listProjects(): Promise<Project[]> {
+	return request('/projects');
+}
+
+export async function createProject(
+	name: string,
+	description: string = '',
+	folder_path: string = '',
+	settings: Record<string, unknown> = {}
+): Promise<Project> {
+	return request('/projects', {
+		method: 'POST',
+		body: JSON.stringify({ name, description, folder_path, settings })
+	});
+}
+
+export async function updateProject(
+	id: number,
+	patch: { name?: string; description?: string; folder_path?: string; settings?: Record<string, unknown> }
+): Promise<Project> {
+	return request(`/projects/${id}`, {
+		method: 'PUT',
+		body: JSON.stringify(patch)
+	});
+}
+
+export async function deleteProject(id: number): Promise<void> {
+	await request(`/projects/${id}`, { method: 'DELETE' });
+}
+
 // ── Experiments ──────────────────────────────────────────
 
 export async function browseFolder(): Promise<string | null> {
-	const res = await request<{ path: string | null }>('/experiments/browse', { method: 'POST' });
+	const res = await request<{ path: string | null; error?: string }>('/experiments/browse', { method: 'POST' });
+	if (res.error === 'picker_not_running') {
+		alert(
+			'The CellQuant folder picker is not running in your Windows session.\n\n' +
+			'Please run this once after logging in:\n\n' +
+			'  D:\\Users\\adb\\dev\\lab-tools\\CellQuantGUI\\cellquant-v3\\cellquant-picker.py\n\n' +
+			'Or type the folder path directly into the text box.'
+		);
+		return null;
+	}
 	return res.path;
 }
 
@@ -90,6 +250,17 @@ export async function configureChannels(
 		method: 'POST',
 		body: JSON.stringify(config)
 	});
+}
+
+export async function saveChannelRoles(sessionId: string, roles: unknown[]): Promise<{ status: string; path: string }> {
+	return request(`/experiments/${sessionId}/save-channel-roles`, {
+		method: 'POST',
+		body: JSON.stringify({ roles })
+	});
+}
+
+export async function loadChannelRoles(sessionId: string): Promise<{ roles: unknown[] | null; path?: string }> {
+	return request(`/experiments/${sessionId}/load-channel-roles`);
 }
 
 export async function setOutputPath(
@@ -477,6 +648,64 @@ export async function configurePreprocessing(
 		method: 'POST',
 		body: JSON.stringify({ dark_frame_paths: darkFramePaths, flat_field_paths: flatFieldPaths })
 	});
+}
+
+// ── Nellie ───────────────────────────────────────────────
+
+export interface NellieParams {
+	channel_suffix?: string;
+	channel_index?: number;
+	remove_edges?: boolean;
+	otsu_thresh_intensity?: boolean;
+	threshold?: number | null;
+	device?: string;
+	low_memory?: boolean;
+	pixel_size_xy?: number | null;
+	pixel_size_z?: number | null;
+	time_interval?: number | null;
+	include_levels?: string[];
+}
+
+export async function runNellie(
+	sessionId: string,
+	params: NellieParams = {}
+): Promise<{ task_id: string }> {
+	return request('/nellie/run', {
+		method: 'POST',
+		body: JSON.stringify({ session_id: sessionId, nellie_params: params })
+	});
+}
+
+export async function cancelNellie(taskId: string): Promise<void> {
+	await request(`/nellie/cancel/${taskId}`, { method: 'POST' });
+}
+
+export async function getNellieResultsPage(
+	sessionId: string,
+	page: number,
+	perPage = 1000
+): Promise<{
+	page: number;
+	per_page: number;
+	total_rows: number;
+	total_pages: number;
+	columns: string[];
+	data: Record<string, unknown>[];
+}> {
+	return request(`/nellie/results/${sessionId}/page/${page}?per_page=${perPage}`);
+}
+
+export async function getNellieSummary(sessionId: string): Promise<{
+	total_cells: number;
+	n_conditions: number;
+	n_image_sets: number;
+	per_condition: Record<string, unknown>[];
+}> {
+	return request(`/nellie/summary/${sessionId}`);
+}
+
+export async function getNellieColumns(sessionId: string): Promise<{ columns: string[] }> {
+	return request(`/nellie/columns/${sessionId}`);
 }
 
 // ── Export ────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
-	import { Microscope, Play, Square, RotateCcw, ChevronLeft, ChevronRight, ChevronDown, FolderOpen, Calculator, Info, Settings2 } from 'lucide-svelte';
-	import { runSegmentation, cancelSegmentation, maskRenderUrl, openResultFolder, runQuantification, getMaskStatus } from '$api/client';
+	import { Microscope, Play, Square, RotateCcw, ChevronLeft, ChevronRight, ChevronDown, FolderOpen, Calculator, Info, Settings2, Activity } from 'lucide-svelte';
+	import { runSegmentation, cancelSegmentation, maskRenderUrl, openResultFolder, runQuantification, getMaskStatus, runNellie, cancelNellie } from '$api/client';
 	import { ProgressSocket } from '$api/websocket';
 	import type { ProgressMessage, QCFilterParams, MaskStatusResponse } from '$api/types';
 	import ConfirmDialog from '$components/ui/ConfirmDialog.svelte';
@@ -13,7 +13,9 @@
 		segRunning, segProgress, segMessage, segWsStatus,
 		segElapsed, segResult, segLogs, segCompletedImages,
 		nuclearSegAvailable,
-		conditionOverrides, type ConditionSegOverride, type CompletedImage
+		conditionOverrides, type ConditionSegOverride, type CompletedImage,
+		nellieSegParams, type NellieSegParams,
+		nellieTaskId, nellieRunning, nellieProgress, nellieMessage, nellieStatus, nellieResult,
 	} from '$stores/segmentation';
 	import { quantTaskId, qcFilterResults, type QCFilterResult } from '$stores/quantification';
 	import TaskStatus from '$components/progress/TaskStatus.svelte';
@@ -31,6 +33,13 @@
 	let quantResult = $state<Record<string, unknown> | null>(null);
 	let quantSocket: ProgressSocket | null = null;
 
+	// Nellie chained analysis
+	let nellieSocket: ProgressSocket | null = null;
+	let nellieAdvExpanded = $state(false);
+	let nelliePixelExpanded = $state(false);
+
+	let availableChannels = $derived($detection?.suggested_markers ?? []);
+
 	// Use the user's channel config (quantify checkbox) — fall back to auto-detection
 	let markerSuffixes = $derived(
 		$channelRoles.filter(r => r.quantify && !r.excluded).length > 0
@@ -39,7 +48,7 @@
 	);
 	let markerNames = $derived(
 		$channelRoles.filter(r => r.quantify && !r.excluded).length > 0
-			? $channelRoles.filter(r => r.quantify && !r.excluded).map(r => r.name)
+			? $channelRoles.filter(r => r.quantify && !r.excluded).map(r => r.name || r.suffix)
 			: markerSuffixes.map((s: string) => s)
 	);
 
@@ -141,7 +150,6 @@
 	}
 
 	function handleWSMessage(msg: ProgressMessage) {
-		if (msg.task_id && msg.task_id !== $segTaskId) return;
 
 		if (msg.logs && msg.logs.length > 0) {
 			$segLogs = msg.logs;
@@ -259,6 +267,11 @@
 		dialogOpen = true;
 	}
 
+	// Local task-id refs — must be declared before use in doRun/startQuantification/startNellie
+	let _segTaskId = '';
+	let _quantTaskId = '';
+	let _nellieTaskIdLocal = '';
+
 	async function doRun(skipExisting: boolean) {
 		if (!$sessionId) return;
 		$segRunning = true;
@@ -275,8 +288,6 @@
 		prevImageSet = '';
 		activeCondition = '';
 		previewIndex = 0;
-
-		connectWebSocket();
 
 		try {
 			// Send user's channel selection for segmentation input
@@ -300,7 +311,11 @@
 				condition_overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
 			} as any);
 			$segTaskId = task_id;
+			_segTaskId = task_id;
 			$segWsStatus = 'running';
+
+			// Connect WS after we have the task_id so filtering works immediately
+			connectWebSocket();
 		} catch (e) {
 			$segRunning = false;
 			$segWsStatus = 'error';
@@ -317,11 +332,6 @@
 		quantStatus = 'running';
 		quantResult = null;
 		$qcFilterResults = [];
-
-		// Connect a separate WS for quantification progress
-		quantSocket = new ProgressSocket($sessionId);
-		quantSocket.onMessage(handleQuantWSMessage);
-		quantSocket.connect();
 
 		try {
 			const defaultQC: QCFilterParams = {
@@ -343,8 +353,15 @@
 				mitochondrial_markers: $channelRoles.filter(r => r.isMitochondrial && !r.excluded).map(r => r.name),
 				qc_filters: defaultQC,
 				outlier_threshold: 3.5,
+				use_gpu: $segParams.use_gpu,
 			});
 			$quantTaskId = task_id;
+			_quantTaskId = task_id;
+
+			// Connect WS after we have the task_id so filtering works immediately
+			quantSocket = new ProgressSocket($sessionId);
+			quantSocket.onMessage(handleQuantWSMessage);
+			quantSocket.connect();
 		} catch (e) {
 			quantRunning = false;
 			quantStatus = 'error';
@@ -355,7 +372,6 @@
 	}
 
 	function handleQuantWSMessage(msg: ProgressMessage) {
-		if (msg.task_id && msg.task_id !== $quantTaskId) return;
 
 		// Append quantification logs to the shared terminal output
 		if (msg.logs && msg.logs.length > 0) {
@@ -386,6 +402,84 @@
 			quantRunning = false;
 			quantSocket?.disconnect();
 			quantSocket = null;
+			// Auto-chain nellie
+			if ($nellieSegParams.enabled && quantStatus === 'complete') {
+				startNellie();
+			}
+		}
+	}
+
+	async function startNellie() {
+		if (!$sessionId) return;
+		$nellieRunning = true;
+		$nellieProgress = 0;
+		$nellieMessage = 'Starting organelle analysis...';
+		$nellieStatus = 'running';
+		$nellieResult = null;
+
+		const p = $nellieSegParams;
+		const includeLevels: string[] = [];
+		if (p.include_organelle) includeLevels.push('organelle');
+		if (p.include_branch) includeLevels.push('branch');
+
+		try {
+			const { task_id } = await runNellie($sessionId, {
+				channel_suffix: p.channel_suffix || undefined,
+				device: p.device,
+				remove_edges: p.remove_edges,
+				otsu_thresh_intensity: p.otsu_thresh_intensity,
+				low_memory: p.low_memory,
+				pixel_size_xy: p.pixel_size_xy ? parseFloat(p.pixel_size_xy) : null,
+				pixel_size_z: p.pixel_size_z ? parseFloat(p.pixel_size_z) : null,
+				time_interval: p.time_interval ? parseFloat(p.time_interval) : null,
+				include_levels: includeLevels,
+			});
+			$nellieTaskId = task_id;
+			_nellieTaskIdLocal = task_id;
+
+			// Connect WS after we have the task_id so filtering works immediately
+			nellieSocket = new ProgressSocket($sessionId);
+			nellieSocket.onMessage(handleNellieWSMessage);
+			nellieSocket.connect();
+		} catch (e) {
+			$nellieRunning = false;
+			$nellieStatus = 'error';
+			$nellieMessage = e instanceof Error ? e.message : 'Nellie failed';
+			nellieSocket?.disconnect();
+			nellieSocket = null;
+		}
+	}
+
+	async function doNellieCancel() {
+		if ($nellieTaskId) {
+			try { await cancelNellie($nellieTaskId); } catch { /* ignore */ }
+		}
+		$nellieRunning = false;
+		$nellieStatus = 'error';
+		$nellieMessage = 'Cancelled';
+		nellieSocket?.disconnect();
+		nellieSocket = null;
+	}
+
+	function handleNellieWSMessage(msg: ProgressMessage) {
+
+		if (msg.logs && msg.logs.length > 0) {
+			$segLogs = msg.logs;
+			if (logPre) requestAnimationFrame(() => { if (logPre) logPre.scrollTop = logPre.scrollHeight; });
+		}
+
+		if (msg.type === 'progress') {
+			$nellieProgress = msg.progress ?? 0;
+			$nellieMessage = msg.message ?? '';
+			$nellieStatus = 'running';
+		} else if (msg.type === 'task_complete') {
+			$nellieProgress = 100;
+			$nellieStatus = msg.status ?? 'complete';
+			$nellieMessage = msg.message ?? '';
+			$nellieResult = (msg.data as Record<string, unknown>) ?? null;
+			$nellieRunning = false;
+			nellieSocket?.disconnect();
+			nellieSocket = null;
 		}
 	}
 
@@ -441,6 +535,8 @@
 		disconnectWebSocket();
 		quantSocket?.disconnect();
 		quantSocket = null;
+		nellieSocket?.disconnect();
+		nellieSocket = null;
 	});
 </script>
 
@@ -631,6 +727,102 @@
 						{/if}
 					{/if}
 				</div>
+
+				<div class="form-field">
+					<label class="field-label quantify-toggle font-ui">
+						<input type="checkbox" bind:checked={$nellieSegParams.enabled} />
+						<Activity size={14} />
+						Run Organelle Analysis After
+					</label>
+					{#if $nellieSegParams.enabled}
+						<span class="field-hint font-ui">
+							Nellie: organelle segmentation, morphology, network metrics per cell
+						</span>
+
+						<!-- Nellie channel -->
+						<div class="nellie-sub">
+							<label class="field-label font-ui" for="nellie-ch">Channel</label>
+							{#if $channelRoles.filter(r => !r.excluded).length > 0}
+								<select id="nellie-ch" class="field-input font-ui" bind:value={$nellieSegParams.channel_suffix}>
+									<option value="">Auto (first available)</option>
+									{#each $channelRoles.filter(r => !r.excluded) as ch}
+										<option value={ch.suffix}>{ch.suffix} ({ch.name || ch.suffix})</option>
+									{/each}
+								</select>
+							{:else}
+								<input id="nellie-ch" type="text" class="field-input font-mono"
+									bind:value={$nellieSegParams.channel_suffix}
+									placeholder="e.g. C1, mito" />
+							{/if}
+						</div>
+
+						<!-- Device -->
+						<div class="nellie-sub">
+							<label class="field-label font-ui" for="nellie-device">Device</label>
+							<select id="nellie-device" class="field-input font-ui" bind:value={$nellieSegParams.device}>
+								<option value="gpu">GPU (CUDA)</option>
+								<option value="auto">Auto</option>
+								<option value="cpu">CPU</option>
+							</select>
+						</div>
+
+						<!-- Feature levels -->
+						<div class="nellie-sub">
+							<label class="field-label font-ui">Features</label>
+							<div class="nellie-checks">
+								<label class="toggle-row font-ui">
+									<input type="checkbox" bind:checked={$nellieSegParams.include_organelle} />
+									<span>Organelle morphology</span>
+								</label>
+								<label class="toggle-row font-ui">
+									<input type="checkbox" bind:checked={$nellieSegParams.include_branch} />
+									<span>Network / branch metrics</span>
+								</label>
+							</div>
+						</div>
+
+						<!-- Advanced -->
+						<details class="nellie-details">
+							<summary class="nellie-summary font-ui" onclick={(e) => { nellieAdvExpanded = !(e.currentTarget.parentElement as HTMLDetailsElement).open; }}>
+								Advanced &amp; pixel size
+							</summary>
+							<div class="nellie-advanced">
+								<label class="toggle-row font-ui">
+									<input type="checkbox" bind:checked={$nellieSegParams.remove_edges} />
+									<span>Remove edge organelles</span>
+								</label>
+								<label class="toggle-row font-ui">
+									<input type="checkbox" bind:checked={$nellieSegParams.otsu_thresh_intensity} />
+									<span>Otsu thresholding</span>
+								</label>
+								<label class="toggle-row font-ui">
+									<input type="checkbox" bind:checked={$nellieSegParams.low_memory} />
+									<span>Low-memory mode</span>
+								</label>
+								<div class="nellie-pixel-row">
+									<div class="nellie-px-field">
+										<label class="field-label font-ui">XY (µm)</label>
+										<input type="number" class="field-input font-mono"
+											bind:value={$nellieSegParams.pixel_size_xy}
+											placeholder="auto" step="0.001" min="0" />
+									</div>
+									<div class="nellie-px-field">
+										<label class="field-label font-ui">Z (µm)</label>
+										<input type="number" class="field-input font-mono"
+											bind:value={$nellieSegParams.pixel_size_z}
+											placeholder="2D" step="0.01" min="0" />
+									</div>
+									<div class="nellie-px-field">
+										<label class="field-label font-ui">T (s)</label>
+										<input type="number" class="field-input font-mono"
+											bind:value={$nellieSegParams.time_interval}
+											placeholder="static" step="1" min="0" />
+									</div>
+								</div>
+							</div>
+						</details>
+					{/if}
+				</div>
 			</div>
 
 			<!-- Per-condition overrides -->
@@ -785,7 +977,7 @@
 					disabled={$segRunning || quantRunning || !$sessionId}
 				>
 					<Play size={16} />
-					{alsoQuantify ? 'Run Analysis' : 'Run Segmentation'}
+					{alsoQuantify && $nellieSegParams.enabled ? 'Run Full Analysis' : alsoQuantify ? 'Run Analysis' : 'Run Segmentation'}
 				</button>
 				{#if maskStatus && maskStatus.total_masks > 0 && !$segRunning && !quantRunning}
 					<button
@@ -796,6 +988,24 @@
 						<Calculator size={16} />
 						Quantify Existing Masks
 					</button>
+					{#if $nellieRunning}
+						<button
+							class="btn btn-danger font-ui"
+							onclick={doNellieCancel}
+						>
+							<Square size={16} />
+							Cancel Nellie
+						</button>
+					{:else}
+						<button
+							class="btn btn-secondary font-ui"
+							onclick={startNellie}
+							disabled={!$sessionId}
+						>
+							<Activity size={16} />
+							Nellie from Masks
+						</button>
+					{/if}
 				{/if}
 				{#if $segRunning}
 					<button class="btn btn-secondary font-ui" onclick={handleCancel}>
@@ -852,6 +1062,34 @@
 							</p>
 						{:else if quantStatus === 'error'}
 							<p class="quant-error font-ui">{quantMessage}</p>
+						{/if}
+					</div>
+				{/if}
+
+				<!-- Nellie status (chained after seg+quant) -->
+				{#if $nellieRunning || $nellieStatus !== 'pending'}
+					<div class="quant-status">
+						<h3 class="quant-status-header font-ui">
+							<Activity size={14} />
+							Organelle Analysis (Nellie)
+						</h3>
+						{#if $nellieRunning}
+							<div class="quant-progress-row">
+								<div class="quant-progress-bar">
+									<div class="quant-progress-fill" style="width: {$nellieProgress}%"></div>
+								</div>
+								<span class="quant-progress-pct font-mono">{Math.round($nellieProgress)}%</span>
+							</div>
+							<p class="quant-message font-ui">{$nellieMessage}</p>
+						{:else if $nellieStatus === 'complete'}
+							<p class="quant-done font-ui">
+								Organelle analysis complete
+								{#if $nellieResult}
+									— {$nellieResult.total_cells} cells across {$nellieResult.conditions} conditions
+								{/if}
+							</p>
+						{:else if $nellieStatus === 'error'}
+							<p class="quant-error font-ui">{$nellieMessage}</p>
 						{/if}
 					</div>
 				{/if}
@@ -978,7 +1216,45 @@
 							</details>
 						{/if}
 					</div>
-				{:else}
+				{/if}
+
+				<!-- Standalone nellie status -->
+				{#if $nellieRunning || $nellieStatus !== 'pending'}
+					<div class="quant-status">
+						<h3 class="quant-status-header font-ui">
+							<Activity size={14} />
+							Organelle Analysis (Nellie)
+						</h3>
+						{#if $nellieRunning}
+							<div class="quant-progress-row">
+								<div class="quant-progress-bar">
+									<div class="quant-progress-fill" style="width: {$nellieProgress}%"></div>
+								</div>
+								<span class="quant-progress-pct font-mono">{Math.round($nellieProgress)}%</span>
+							</div>
+							<p class="quant-message font-ui">{$nellieMessage}</p>
+						{:else if $nellieStatus === 'complete'}
+							<p class="quant-done font-ui">
+								Organelle analysis complete
+								{#if $nellieResult}
+									— {$nellieResult.total_cells} cells across {$nellieResult.conditions} conditions
+								{/if}
+							</p>
+						{:else if $nellieStatus === 'error'}
+							<p class="quant-error font-ui">{$nellieMessage}</p>
+						{/if}
+						{#if $segLogs.length > 0}
+							<details class="log-panel" style="margin-top: 12px;" open>
+								<summary class="log-summary font-ui">
+									Terminal Output <span class="log-count">{$segLogs.length} lines</span>
+								</summary>
+								<pre class="log-output font-mono" bind:this={logPre}>{$segLogs.join('\n')}</pre>
+							</details>
+						{/if}
+					</div>
+				{/if}
+
+				{#if quantStatus === 'pending' && !quantRunning && !$nellieRunning && $nellieStatus === 'pending'}
 					<div class="preview-area">
 						<div class="placeholder font-ui">
 							<Microscope size={48} strokeWidth={1} />
@@ -1651,5 +1927,75 @@
 		.two-col {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	/* ── Nellie sub-controls ──────────────────────────────── */
+
+	.nellie-sub {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		margin-top: 8px;
+		padding-left: 22px;
+	}
+
+	.nellie-checks {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.toggle-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 12px;
+		color: var(--text);
+		cursor: pointer;
+	}
+
+	.toggle-row input[type='checkbox'] {
+		accent-color: var(--accent);
+	}
+
+	.nellie-details {
+		margin-top: 8px;
+		padding-left: 22px;
+	}
+
+	.nellie-summary {
+		font-size: 11px;
+		color: var(--text-muted);
+		cursor: pointer;
+		user-select: none;
+		list-style: none;
+	}
+
+	.nellie-summary:hover {
+		color: var(--accent);
+	}
+
+	.nellie-advanced {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		margin-top: 8px;
+		padding: 10px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-md);
+	}
+
+	.nellie-pixel-row {
+		display: grid;
+		grid-template-columns: 1fr 1fr 1fr;
+		gap: 8px;
+		margin-top: 4px;
+	}
+
+	.nellie-px-field {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
 	}
 </style>

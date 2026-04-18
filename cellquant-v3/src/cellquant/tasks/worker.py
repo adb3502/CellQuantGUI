@@ -408,7 +408,18 @@ def run_quantification_task(
     )
     if mitochondrial_markers and nuclear_suffix_global:
         from cellquant.core.segmentation.cellpose_engine import CellposeEngine
-        use_gpu = quant_params.get("use_gpu", False)
+        use_gpu = quant_params.get("use_gpu", True)
+        # Reset CUDA context before loading a new Cellpose model — prevents CUBLAS
+        # errors when a previous GPU op (e.g. nellie or main segmentation) left the
+        # context in a dirty state.
+        if use_gpu:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
         print(
             f"[CellQuant] Initializing nuclear engine for mito correction "
             f"(model=nuclei, gpu={use_gpu}, nuclear_channel={nuclear_suffix_global})"
@@ -482,6 +493,21 @@ def run_quantification_task(
                 }
             else:
                 filtered_masks = masks
+
+            if not np.any(filtered_masks > 0):
+                print(
+                    f"[CellQuant] Skipping quantification for {cond_name}/{base_name}: "
+                    "no cells remain in the mask"
+                )
+                task.progress_data = {
+                    "quant_warning": {
+                        "condition": cond_name,
+                        "image_set": base_name,
+                        "reason": "no_cells_after_filtering",
+                    }
+                }
+                processed += 1
+                continue
 
             # ── Stage 2: Load marker images + preprocess ──────────
             channels = image_sets.get(base_name, {})
@@ -591,6 +617,13 @@ def run_quantification_task(
         # ── Stage 5: Outlier detection ────────────────────────────
         combined = flag_outliers_in_dataframe(combined, threshold=outlier_threshold)
 
+        # ── Stage 6: JC-1 ratio ───────────────────────────────────
+        jc1_raw = quant_params.get("jc1")
+        if jc1_raw:
+            from cellquant.core.quantification.jc1 import JC1Config, add_jc1_ratio_column
+            jc1_cfg = JC1Config(**jc1_raw)
+            combined = add_jc1_ratio_column(combined, jc1_cfg)
+
         session.results_df = combined
         session.save_results()
         n_outliers = 0
@@ -605,6 +638,195 @@ def run_quantification_task(
         }
 
     return {"total_cells": 0, "conditions": 0, "qc_rejected": 0, "outliers_flagged": 0}
+
+
+def run_nellie_task(
+    task: TaskInfo,
+    queue: TaskQueue,
+    session,
+    nellie_params: dict,
+):
+    """Run nellie organelle analysis pipeline in a background thread.
+
+    For each condition + image-set that has a cell mask, we:
+      1. Locate the organelle channel TIFF.
+      2. Run nellie.run() via the wrapper.
+      3. Collect per-cell organelle features.
+      4. Merge results into the session's existing results_df
+         (or create a standalone DataFrame if CTCF hasn't been run yet).
+    """
+    from cellquant.core.quantification.nellie_wrapper import (
+        NellieParams,
+        run_nellie_on_image,
+    )
+    from cellquant.core.io.image_loader import load_image
+    import numpy as np
+    import pandas as pd
+
+    params_raw = nellie_params.get("nellie_params", {})
+    params = NellieParams(
+        channel_index=params_raw.get("channel_index", 0),
+        remove_edges=params_raw.get("remove_edges", False),
+        otsu_thresh_intensity=params_raw.get("otsu_thresh_intensity", False),
+        threshold=params_raw.get("threshold"),
+        device=params_raw.get("device", "auto"),
+        low_memory=params_raw.get("low_memory", False),
+        pixel_size_xy=params_raw.get("pixel_size_xy"),
+        pixel_size_z=params_raw.get("pixel_size_z"),
+        time_interval=params_raw.get("time_interval"),
+        include_levels=params_raw.get("include_levels", ["organelle", "branch"]),
+    )
+    channel_suffix = params_raw.get("channel_suffix", "")
+
+    # Ensure masks are loaded from disk if needed
+    if not session.masks or all(len(v) == 0 for v in session.masks.values()):
+        loaded_count = 0
+        for cond_name in session.conditions:
+            mask_dir = session.directory / "masks" / cond_name
+            if mask_dir.exists():
+                session.masks.setdefault(cond_name, {})
+                for npy_file in sorted(mask_dir.glob("*_masks.npy")):
+                    base = npy_file.stem.replace("_masks", "")
+                    session.masks[cond_name][base] = np.load(npy_file)
+                    loaded_count += 1
+        if loaded_count > 0:
+            print(f"[Nellie] Loaded {loaded_count} masks from disk")
+
+    total = sum(len(masks) for masks in session.masks.values())
+    task.total = total
+    processed = 0
+    all_dfs: list[pd.DataFrame] = []
+
+    for cond_name, cond_masks in session.masks.items():
+        if task.status == "cancelled":
+            break
+
+        cond_data = session.conditions.get(cond_name, {})
+        image_sets = cond_data.get("image_sets", {})
+
+        for base_name, masks in cond_masks.items():
+            if task.status == "cancelled":
+                break
+
+            queue.update_progress(
+                task,
+                current=processed,
+                stage="nellie",
+                condition=cond_name,
+                image_set=base_name,
+                message=f"Nellie: {cond_name}/{base_name}",
+            )
+
+            channels = image_sets.get(base_name, {})
+
+            # Locate the organelle channel file
+            image_path = None
+            if channel_suffix:
+                image_path = (
+                    channels.get(channel_suffix)
+                    or channels.get(channel_suffix.upper())
+                    or channels.get(channel_suffix.lower())
+                )
+            # Fallback: pick the first available channel
+            if not image_path and channels:
+                image_path = next(iter(channels.values()))
+
+            if not image_path:
+                print(f"[Nellie] Skipping {cond_name}/{base_name}: no channel file found")
+                processed += 1
+                continue
+
+            # Output directory: per-image-set subfolder so nellie doesn't clobber files
+            nellie_output_dir = (
+                session.directory / "nellie_output" / cond_name / base_name
+            )
+
+            try:
+                df = run_nellie_on_image(
+                    image_path=image_path,
+                    cell_masks=masks,
+                    output_dir=nellie_output_dir,
+                    condition=cond_name,
+                    image_set=base_name,
+                    params=params,
+                )
+                n_cells = len(df)
+                print(
+                    f"[Nellie] {cond_name}/{base_name}: {n_cells} cells, "
+                    f"{int(df['nellie_n_organelles'].sum()) if 'nellie_n_organelles' in df.columns else '?'} organelles"
+                )
+                if n_cells > 0:
+                    all_dfs.append(df)
+            except Exception as exc:
+                print(f"[Nellie] Error on {cond_name}/{base_name}: {exc}")
+
+            processed += 1
+
+    if not all_dfs:
+        return {"total_cells": 0, "conditions": 0}
+
+    nellie_combined = pd.concat(all_dfs, ignore_index=True)
+
+    # Merge into existing results_df if it exists; otherwise store standalone
+    if session.results_df is not None and len(session.results_df) > 0:
+        existing = session.results_df
+        merge_keys = ["Condition", "ImageSet", "CellID"]
+        # Only merge on keys that exist in both
+        shared_keys = [k for k in merge_keys if k in existing.columns and k in nellie_combined.columns]
+        if shared_keys:
+            # Drop any nellie columns already in existing to avoid duplicates
+            nellie_new_cols = [c for c in nellie_combined.columns if c not in shared_keys and c not in existing.columns]
+            if nellie_new_cols:
+                merged = existing.merge(
+                    nellie_combined[shared_keys + nellie_new_cols],
+                    on=shared_keys,
+                    how="left",
+                )
+                session.results_df = merged
+                print(f"[Nellie] Merged {len(nellie_new_cols)} new columns into existing results")
+            else:
+                print("[Nellie] All nellie columns already present — skipping merge")
+        session.save_results()
+    else:
+        # No prior quantification — try to load from disk first
+        session.load_results()
+        if session.results_df is not None and len(session.results_df) > 0:
+            # Results were on disk (e.g. after server restart) — merge into them
+            existing = session.results_df
+            merge_keys = ["Condition", "ImageSet", "CellID"]
+            shared_keys = [k for k in merge_keys if k in existing.columns and k in nellie_combined.columns]
+            if shared_keys:
+                nellie_new_cols = [c for c in nellie_combined.columns if c not in shared_keys and c not in existing.columns]
+                if nellie_new_cols:
+                    session.results_df = existing.merge(
+                        nellie_combined[shared_keys + nellie_new_cols],
+                        on=shared_keys,
+                        how="left",
+                    )
+                    print(f"[Nellie] Merged {len(nellie_new_cols)} columns into disk-loaded results")
+            session.save_results()
+        else:
+            # Truly standalone — make nellie results the primary results_df
+            session.results_df = nellie_combined
+            session.save_results()
+            print(f"[Nellie] No prior quantification — nellie results set as primary results")
+
+    return {
+        "total_cells": len(nellie_combined),
+        "conditions": nellie_combined["Condition"].nunique(),
+    }
+
+
+def _save_nellie_results(session, df: "pd.DataFrame") -> None:
+    """Persist standalone nellie results to disk."""
+    import pandas as pd
+    out_dir = session.directory / "nellie_output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_dir / "nellie_results.csv", index=False)
+    try:
+        df.to_parquet(out_dir / "nellie_results.parquet", index=False)
+    except Exception:
+        pass
 
 
 def run_tracking_task(

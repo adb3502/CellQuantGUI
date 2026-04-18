@@ -2,8 +2,18 @@
 	import ThemeToggle from './ThemeToggle.svelte';
 	import { sessionId } from '$stores/session';
 	import { totalImages } from '$stores/experiment';
+	import { authUser, isAdmin, clearAuth } from '$stores/auth';
+	import { goto } from '$app/navigation';
+	import { logout } from '$api/client';
+	import { LogOut, Shield } from 'lucide-svelte';
 
 	let { title = 'CellQuant' }: { title?: string } = $props();
+
+	async function handleLogout() {
+		try { await logout(); } catch { /* ignore */ }
+		clearAuth();
+		goto('/login');
+	}
 </script>
 
 <header class="app-header">
@@ -19,6 +29,24 @@
 				{$totalImages} images
 			</div>
 		{/if}
+
+		{#if $authUser}
+			<div class="user-badge font-ui">
+				{#if $isAdmin}
+					<Shield size={12} />
+				{/if}
+				<span class="user-name">{$authUser.username}</span>
+			</div>
+
+			{#if $isAdmin}
+				<a href="/admin" class="header-link font-ui" title="Admin panel">Admin</a>
+			{/if}
+
+			<button class="logout-btn" onclick={handleLogout} title="Sign out">
+				<LogOut size={15} />
+			</button>
+		{/if}
+
 		<ThemeToggle />
 	</div>
 </header>
@@ -74,7 +102,7 @@
 	.header-right {
 		display: flex;
 		align-items: center;
-		gap: 16px;
+		gap: 12px;
 	}
 
 	.header-session {
@@ -90,5 +118,53 @@
 		height: 6px;
 		border-radius: 50%;
 		background: var(--success);
+	}
+
+	.user-badge {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		background: var(--accent-soft);
+		border-radius: var(--radius-pill);
+		color: var(--accent);
+		font-size: 11px;
+		font-weight: 600;
+		padding: 3px 10px;
+	}
+
+	.user-name {
+		max-width: 120px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.header-link {
+		color: var(--text-muted);
+		font-size: 12px;
+		font-weight: 500;
+		text-decoration: none;
+		transition: color var(--transition-fast);
+	}
+
+	.header-link:hover {
+		color: var(--accent);
+	}
+
+	.logout-btn {
+		background: none;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		color: var(--text-muted);
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		padding: 5px;
+		transition: all var(--transition-fast);
+	}
+
+	.logout-btn:hover {
+		border-color: var(--error);
+		color: var(--error);
 	}
 </style>

@@ -24,6 +24,47 @@ const defaultSegParams: SegmentationParams = {
 	batch_size: 4,
 };
 
+export interface NellieSegParams {
+	enabled: boolean;
+	channel_suffix: string;
+	device: string;
+	remove_edges: boolean;
+	otsu_thresh_intensity: boolean;
+	low_memory: boolean;
+	include_organelle: boolean;
+	include_branch: boolean;
+	pixel_size_xy: string;
+	pixel_size_z: string;
+	time_interval: string;
+}
+
+const defaultNellieParams: NellieSegParams = {
+	enabled: false,
+	channel_suffix: '',
+	device: 'auto',
+	remove_edges: false,
+	otsu_thresh_intensity: false,
+	low_memory: false,
+	include_organelle: true,
+	include_branch: true,
+	pixel_size_xy: '',
+	pixel_size_z: '',
+	time_interval: '',
+};
+
+const NELLIE_PARAMS_KEY = 'cellquant_nellie_params';
+
+function persistedNellieParams() {
+	const store = writable<NellieSegParams>(loadStored(NELLIE_PARAMS_KEY, defaultNellieParams));
+	store.subscribe(v => {
+		if (typeof localStorage !== 'undefined')
+			localStorage.setItem(NELLIE_PARAMS_KEY, JSON.stringify(v));
+	});
+	return store;
+}
+
+export const nellieSegParams = persistedNellieParams();
+
 function persistedSegParams() {
 	const store = writable<SegmentationParams>(loadStored(SEG_PARAMS_KEY, defaultSegParams));
 	store.subscribe(v => {
@@ -80,6 +121,14 @@ export const segLogs = writable<string[]>([]);
 export const segCompletedImages = writable<CompletedImage[]>([]);
 export const nuclearSegAvailable = writable(false);
 
+// Nellie runtime state (persists across tab navigation)
+export const nellieTaskId = writable<string | null>(null);
+export const nellieRunning = writable(false);
+export const nellieProgress = writable(0);
+export const nellieMessage = writable('');
+export const nellieStatus = writable('pending');
+export const nellieResult = writable<Record<string, unknown> | null>(null);
+
 /** Reset all runtime state for a new run */
 export function resetSegState() {
 	segRunning.set(false);
@@ -92,4 +141,10 @@ export function resetSegState() {
 	segCompletedImages.set([]);
 	segTaskId.set(null);
 	nuclearSegAvailable.set(false);
+	nellieTaskId.set(null);
+	nellieRunning.set(false);
+	nellieProgress.set(0);
+	nellieMessage.set('');
+	nellieStatus.set('pending');
+	nellieResult.set(null);
 }

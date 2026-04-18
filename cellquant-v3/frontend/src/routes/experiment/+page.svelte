@@ -4,7 +4,7 @@
 		Eye, EyeOff, ChevronLeft, ChevronRightIcon, X, XCircle, Undo2,
 		Palette
 	} from 'lucide-svelte';
-	import { browseFolder, scanExperiment, configureChannels, setOutputPath, renderUrl } from '$api/client';
+	import { scanExperiment, configureChannels, setOutputPath, renderUrl, browseFolder, saveChannelRoles, loadChannelRoles } from '$api/client';
 	import type { ChannelRole, ConditionInfo } from '$api/types';
 	import { DEFAULT_CHANNEL_COLORS } from '$api/types';
 	import { sessionId } from '$stores/session';
@@ -20,8 +20,6 @@
 	let folderPath = $state($experimentPath ?? '');
 	let outPath = $state($outputPath ?? '');
 	let scanning = $state(false);
-	let browsing = $state(false);
-	let browsingOutput = $state(false);
 	let error = $state('');
 
 	// Expandable conditions
@@ -127,41 +125,25 @@
 		excludeImageSet(currentPreview.condition, currentPreview.baseName, currentPreview.channels);
 	}
 
+	async function openFolderPicker(target: 'experiment' | 'output') {
+		const path = await browseFolder();
+		if (!path) return;
+
+		if (target === 'experiment') {
+			folderPath = path;
+			void handleScan();
+			return;
+		}
+
+		outPath = path;
+		$outputPath = path;
+		if ($sessionId) {
+			void setOutputPath($sessionId, path);
+		}
+	}
+
 	function handleUndo() {
 		undoExclude();
-	}
-
-	// ── Actions ──
-	async function handleBrowse() {
-		browsing = true;
-		error = '';
-		try {
-			const path = await browseFolder();
-			if (path) {
-				folderPath = path;
-				await handleScan();
-			}
-		} catch {
-			error = 'Could not open folder dialog';
-		} finally {
-			browsing = false;
-		}
-	}
-
-	async function handleBrowseOutput() {
-		browsingOutput = true;
-		try {
-			const path = await browseFolder();
-			if (path) {
-				outPath = path;
-				$outputPath = path;
-				if ($sessionId) await setOutputPath($sessionId, path);
-			}
-		} catch {
-			// ignore
-		} finally {
-			browsingOutput = false;
-		}
 	}
 
 	async function handleScan() {
@@ -244,6 +226,21 @@
 				if (wlEntries.length > 0) {
 					addLog('info', `Wavelengths detected: ${wlEntries.map(([s, nm]) => `${s}=${nm}nm`).join(', ')}`);
 				}
+
+				// Restore saved channel config from disk if available
+				try {
+					const savedResult = await loadChannelRoles(result.session_id);
+					const saved = savedResult.roles as ChannelRole[] | null;
+					if (saved && saved.length > 0) {
+						const savedBySuffix = Object.fromEntries(saved.map((r) => [r.suffix, r]));
+						const merged = channels.map((ch) => savedBySuffix[ch.suffix] ?? ch);
+						const restoredCount = merged.filter((ch) => savedBySuffix[ch.suffix]).length;
+						if (restoredCount === channels.length) {
+							channels = merged;
+							configSaveMessage = 'Channel configuration restored from saved settings';
+						}
+					}
+				} catch { /* no saved config yet */ }
 			}
 
 			// Build preview items list
@@ -313,10 +310,13 @@
 	});
 
 	let channelWarnings = $state<string[]>([]);
+	let configSaveMessage = $state('');
+
 
 	async function saveChannelConfig() {
 		// Persist to store
 		$channelRoles = [...channels];
+
 
 		// Validation warnings
 		const warnings: string[] = [];
@@ -356,6 +356,19 @@
 		$markerNames = markerNamesList.join(', ');
 	}
 
+	async function handleSaveConfig() {
+		await saveChannelConfig();
+		if ($sessionId) {
+			try {
+				const result = await saveChannelRoles($sessionId, channels);
+				configSaveMessage = `Configuration saved to: ${result.path}`;
+			} catch {
+				configSaveMessage = 'Failed to save configuration';
+			}
+		}
+		setTimeout(() => { configSaveMessage = ''; }, 5000);
+	}
+
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'ArrowLeft') prevPreview();
 		else if (e.key === 'ArrowRight') nextPreview();
@@ -379,8 +392,8 @@
 							class="folder-input font-ui"
 							onkeydown={(e) => e.key === 'Enter' && handleScan()} />
 					</div>
-					<button class="btn btn-secondary font-ui" onclick={handleBrowse} disabled={browsing || scanning}>
-						{browsing || scanning ? '...' : 'Browse'}
+					<button class="btn btn-secondary font-ui" onclick={() => openFolderPicker('experiment')} disabled={scanning}>
+						Browse
 					</button>
 				</div>
 				{#if error}
@@ -396,8 +409,8 @@
 								class="folder-input font-ui"
 								onchange={async () => { $outputPath = outPath; if ($sessionId) await setOutputPath($sessionId, outPath); }} />
 						</div>
-						<button class="btn btn-secondary font-ui" onclick={handleBrowseOutput} disabled={browsingOutput}>
-							{browsingOutput ? '...' : 'Browse'}
+						<button class="btn btn-secondary font-ui" onclick={() => openFolderPicker('output')}>
+							Browse
 						</button>
 					</div>
 				{/if}
@@ -456,7 +469,15 @@
 				<!-- Channel Configuration -->
 				{#if channels.length > 0}
 					<section class="panel">
-						<h2 class="section-header">Channel Configuration</h2>
+						<div class="section-header-row">
+							<h2 class="section-header">Channel Configuration</h2>
+							<button class="btn btn-secondary btn-sm font-ui" onclick={handleSaveConfig} disabled={!folderPath}>
+								<Save size={13} /> Save Config
+							</button>
+						</div>
+						{#if configSaveMessage}
+							<div class="config-save-msg font-ui">{configSaveMessage}</div>
+						{/if}
 						<table class="channel-table">
 							<thead>
 								<tr>
@@ -642,6 +663,35 @@
 </div>
 
 <style>
+	.section-header-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 8px;
+	}
+
+	.section-header-row .section-header {
+		margin-bottom: 0;
+	}
+
+	.btn-sm {
+		padding: 4px 10px;
+		font-size: 12px;
+		display: flex;
+		align-items: center;
+		gap: 5px;
+	}
+
+	.config-save-msg {
+		font-size: 12px;
+		color: var(--success, #22c55e);
+		margin-bottom: 8px;
+		padding: 6px 10px;
+		background: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
+		border-radius: var(--radius-sm);
+		border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
+	}
+
 	.page-experiment {
 		display: flex;
 		flex-direction: column;

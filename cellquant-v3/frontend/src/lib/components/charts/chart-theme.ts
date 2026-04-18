@@ -28,6 +28,8 @@ export const COLOR_PALETTES = {
 } as const;
 
 export type PaletteId = keyof typeof COLOR_PALETTES;
+export const CHART_TYPES = ['box', 'violin', 'half-violin', 'histogram', 'density'] as const;
+export type ChartType = (typeof CHART_TYPES)[number];
 
 export function getColor(idx: number, palette: PaletteId = 'default'): string {
 	const colors = COLOR_PALETTES[palette].colors;
@@ -131,30 +133,28 @@ export const INTERACTIVE_CONFIG = {
 // ── Client-side KDE ───────────────────────────────────
 
 export function computeKDE(values: number[], nPoints = 200): { x: number[]; y: number[] } {
+	if (values.length === 0) return { x: [], y: [] };
 	const sorted = [...values].sort((a, b) => a - b);
 	const n = sorted.length;
-	if (n < 2) return { x: [], y: [] };
-
 	const mean = sorted.reduce((a, b) => a + b, 0) / n;
-	const sd = Math.sqrt(sorted.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1));
+	const sd = Math.sqrt(sorted.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1 || 1));
 	const iqr = sorted[Math.floor(n * 0.75)] - sorted[Math.floor(n * 0.25)];
-
-	// Silverman's rule of thumb
 	const bandwidth = 1.06 * Math.min(sd, (iqr || sd) / 1.34) * Math.pow(n, -0.2);
-	if (bandwidth <= 0) return { x: [], y: [] };
-
+	if (bandwidth === 0 || !isFinite(bandwidth)) return { x: [sorted[0]], y: [1] };
 	const pad = 3 * bandwidth;
 	const xMin = sorted[0] - pad;
 	const xMax = sorted[n - 1] + pad;
 	const step = (xMax - xMin) / (nPoints - 1);
-	const coeff = 1 / (n * bandwidth * Math.sqrt(2 * Math.PI));
-
 	const xs: number[] = [];
 	const ys: number[] = [];
+	const coeff = 1 / (n * bandwidth * Math.sqrt(2 * Math.PI));
 	for (let i = 0; i < nPoints; i++) {
 		const x = xMin + i * step;
 		let sum = 0;
-		for (const v of sorted) sum += Math.exp(-0.5 * ((x - v) / bandwidth) ** 2);
+		for (let j = 0; j < n; j++) {
+			const z = (x - sorted[j]) / bandwidth;
+			sum += Math.exp(-0.5 * z * z);
+		}
 		xs.push(x);
 		ys.push(coeff * sum);
 	}
@@ -177,4 +177,99 @@ export function removeOutliersIQR(values: number[]): { filtered: number[]; lower
 		lower,
 		upper,
 	};
+}
+
+export function computeStats(values: number[]) {
+	if (values.length === 0) return { n: 0, mean: 0, median: 0, sd: 0, q1: 0, q3: 0, min: 0, max: 0 };
+	const sorted = [...values].sort((a, b) => a - b);
+	const n = sorted.length;
+	const mean = sorted.reduce((a, b) => a + b, 0) / n;
+	const pctl = (p: number) => {
+		const k = (n - 1) * p;
+		const f = Math.floor(k);
+		return sorted[f] + (k - f) * ((sorted[f + 1] ?? sorted[f]) - sorted[f]);
+	};
+	return {
+		n,
+		mean: Math.round(mean * 100) / 100,
+		median: Math.round(pctl(0.5) * 100) / 100,
+		sd: n > 1 ? Math.round(Math.sqrt(sorted.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1)) * 100) / 100 : 0,
+		q1: Math.round(pctl(0.25) * 100) / 100,
+		q3: Math.round(pctl(0.75) * 100) / 100,
+		min: sorted[0],
+		max: sorted[n - 1],
+	};
+}
+
+export function erfcApprox(x: number): number {
+	if (x < 0) return 2 - erfcApprox(-x);
+	const t = 1 / (1 + 0.3275911 * x);
+	const poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+	return poly * Math.exp(-x * x);
+}
+
+export function computeKwPair(vals1: number[], vals2: number[]): { eps: number; H: number; pRaw: number } {
+	const n1 = vals1.length;
+	const n2 = vals2.length;
+	const N = n1 + n2;
+	if (n1 < 2 || n2 < 2) return { eps: 0, H: 0, pRaw: 1 };
+	const combined = [
+		...vals1.map((v) => ({ v, g: 0 })),
+		...vals2.map((v) => ({ v, g: 1 })),
+	].sort((a, b) => a.v - b.v);
+	const ranks = new Array(N).fill(0);
+	let i = 0;
+	while (i < N) {
+		let j = i;
+		while (j < N - 1 && combined[j + 1].v === combined[j].v) j++;
+		const avgRank = (i + j) / 2 + 1;
+		for (let k = i; k <= j; k++) ranks[k] = avgRank;
+		i = j + 1;
+	}
+	let R1 = 0;
+	for (let k = 0; k < N; k++) if (combined[k].g === 0) R1 += ranks[k];
+	const R2 = (N * (N + 1)) / 2 - R1;
+	const H = Math.max(0, (12 / (N * (N + 1))) * (R1 * R1 / n1 + R2 * R2 / n2) - 3 * (N + 1));
+	const eps = Math.min(1, H / (N - 1));
+	return { eps, H, pRaw: erfcApprox(Math.sqrt(H / 2)) };
+}
+
+export function deterministicJitter(
+	pointIndex: number,
+	groupIndex: number,
+	offset = 0,
+	spread = 0.15,
+	densityScale = 1,
+): number {
+	const seed = ((pointIndex * 2654435761 + groupIndex * 1597334677) >>> 0) % 10000;
+	return offset + (seed / 10000 - 0.5) * spread * densityScale;
+}
+
+export function buildDensityScales(values: number[]): number[] {
+	if (values.length < 3) return values.map(() => 1);
+	const sorted = [...values].sort((a, b) => a - b);
+	const min = sorted[0];
+	const max = sorted[sorted.length - 1];
+	const range = max - min;
+	if (range === 0) return values.map(() => 1);
+	const nBins = Math.max(10, Math.min(30, Math.round(values.length / 5)));
+	const binWidth = range / nBins;
+	const bins = new Array(nBins).fill(0);
+	for (const v of values) bins[Math.min(Math.floor((v - min) / binWidth), nBins - 1)]++;
+	const smooth = bins.map((_, i) => {
+		const lo = Math.max(0, i - 1);
+		const hi = Math.min(nBins - 1, i + 1);
+		let sum = 0;
+		let cnt = 0;
+		for (let j = lo; j <= hi; j++) {
+			sum += bins[j];
+			cnt++;
+		}
+		return sum / cnt;
+	});
+	const maxBin = Math.max(...smooth);
+	return values.map((v) => {
+		const b = Math.min(Math.floor((v - min) / binWidth), nBins - 1);
+		return Math.max(0.15, smooth[b] / maxBin);
+	});
 }

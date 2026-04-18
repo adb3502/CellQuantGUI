@@ -11,9 +11,11 @@
 		ScrollText,
 		Brain,
 		Layers,
+		Shield,
 		PanelLeftClose,
 		PanelLeftOpen
 	} from 'lucide-svelte';
+	import { isAdmin } from '$stores/auth';
 
 	const navItems = [
 		{ href: '/experiment', label: 'Experiment', icon: FlaskConical },
@@ -75,6 +77,22 @@
 			</li>
 		{/each}
 	</ul>
+
+	{#if $isAdmin}
+		<div class="sidebar-admin">
+			<a
+				href="/admin"
+				class="sidebar-link"
+				class:active={currentPath.startsWith('/admin')}
+				title={collapsed ? 'Admin' : undefined}
+			>
+				<span class="sidebar-icon">
+					<Shield size={20} strokeWidth={currentPath.startsWith('/admin') ? 2.2 : 1.6} />
+				</span>
+				{#if !collapsed}<span class="sidebar-label font-ui">Admin</span>{/if}
+			</a>
+		</div>
+	{/if}
 
 	{#if !collapsed}
 		<div class="sidebar-footer font-mono">
@@ -202,6 +220,12 @@
 		border-radius: 50%;
 		background: var(--accent);
 		margin-left: auto;
+	}
+
+	.sidebar-admin {
+		padding: 4px 8px;
+		border-top: 1px solid var(--border);
+		flex-shrink: 0;
 	}
 
 	.sidebar-footer {

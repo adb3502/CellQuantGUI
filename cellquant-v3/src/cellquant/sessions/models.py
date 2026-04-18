@@ -107,14 +107,22 @@ class Session:
             json.dump(state, f, indent=2)
 
     def save_results(self):
-        """Save results DataFrame as Parquet."""
+        """Save results DataFrame as Parquet and update the live CSV."""
         if self.results_df is not None and len(self.results_df) > 0:
             self.results_df.to_parquet(self.get_results_path(), index=False)
+            # Also keep a live CSV so users can open it without triggering an export
+            csv_path = self.directory / "results" / "cellquant_results.csv"
+            self.results_df.to_csv(csv_path, index=False)
 
     def load_results(self) -> Optional[pd.DataFrame]:
-        """Load results from Parquet if available."""
+        """Load results from Parquet if available, falling back to nellie standalone CSV."""
         path = self.get_results_path()
         if path.exists():
             self.results_df = pd.read_parquet(path)
+            return self.results_df
+        # Fall back to nellie standalone CSV if quantification was never run
+        nellie_csv = self.directory / "nellie_output" / "nellie_results.csv"
+        if nellie_csv.exists():
+            self.results_df = pd.read_csv(nellie_csv)
             return self.results_df
         return None
