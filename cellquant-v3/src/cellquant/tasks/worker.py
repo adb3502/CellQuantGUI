@@ -905,7 +905,30 @@ def run_tracking_task(
     return {"n_tracks": n_tracks, "n_frames": len(sorted_names)}
 
 
-def _build_trace_tables(stack, masks, condition, image_set, config):
+def _estimate_frame_backgrounds(stack, masks):
+    """Per-frame background level outside the cell masks.
+
+    Spec 4.4 requires background-subtracted traces. A constant offset B in
+    F0 compresses dF/F0 by F_true0/(F_true0+B), so leaving it in
+    systematically understates every response.
+    """
+    import numpy as np
+
+    stack = np.asarray(stack, dtype=np.float64)
+    masks = np.asarray(masks)
+    out = np.zeros(stack.shape[0], dtype=np.float64)
+    for t in range(stack.shape[0]):
+        frame_mask = masks[t] if masks.ndim == 3 else masks
+        bg_pixels = stack[t][frame_mask == 0]
+        if bg_pixels.size == 0:
+            out[t] = 0.0
+        else:
+            out[t] = float(np.median(bg_pixels))
+    return out
+
+
+def _build_trace_tables(stack, masks, condition, image_set, config,
+                        subtract_background=True):
     """Build the long traces table and the per-cell summary table."""
     import numpy as np
     import pandas as pd
@@ -918,22 +941,28 @@ def _build_trace_tables(stack, masks, condition, image_set, config):
     )
 
     traces = extract_traces(stack, masks)
+    backgrounds = (_estimate_frame_backgrounds(stack, masks)
+                   if subtract_background else np.zeros(np.shape(stack)[0]))
     trace_rows = []
     summary_rows = []
 
+    tracked = np.asarray(masks).ndim == 3
     for cell_id, trace in sorted(traces.items()):
-        f0 = compute_baseline(trace, config)
-        dff = compute_dff(trace, f0)
-        summary = summarize_trace(trace, config, cell_id=cell_id)
+        corrected = np.asarray(trace, dtype=np.float64) - backgrounds
+        f0 = compute_baseline(corrected, config)
+        dff = compute_dff(corrected, f0)
+        summary = summarize_trace(corrected, config, cell_id=cell_id)
 
-        for frame, (raw, d) in enumerate(zip(trace, dff)):
+        for frame, (raw, corr, d) in enumerate(zip(trace, corrected, dff)):
             trace_rows.append({
                 "Condition": condition,
                 "ImageSet": image_set,
                 "CellID": int(cell_id),
+                "TrackID": int(cell_id) if tracked else None,
                 "Frame": int(frame),
                 "Time_s": frame * config.interval_s if config.interval_s else None,
                 "F_raw": float(raw),
+                "F_bg_corrected": float(corr),
                 "dF_F0": float(d),
             })
 
@@ -941,13 +970,16 @@ def _build_trace_tables(stack, masks, condition, image_set, config):
             "Condition": condition,
             "ImageSet": image_set,
             "CellID": int(cell_id),
+            "TrackID": int(cell_id) if tracked else None,
             "baseline_f0": summary.baseline_f0,
+            "baseline_is_fallback": summary.baseline_is_fallback,
             "peak_dF_F0": summary.peak_dff,
             "peak_frame": summary.peak_frame,
             "time_to_peak_s": summary.time_to_peak_s,
             "auc": summary.auc,
             "rise_time_10_90": summary.rise_time_10_90,
-            "decay_tau": summary.decay_tau,
+            "decay_tau_frames": summary.decay_tau_frames,
+            "decay_tau_s": summary.decay_tau_s,
             "snr": summary.snr,
             "n_events": summary.n_events,
             "event_freq_hz": summary.event_freq_hz,

@@ -57,7 +57,7 @@ def test_flat_trace_reports_no_events_and_nan_tau():
     cfg = TemporalConfig(baseline_fraction=0.10, event_threshold_sigma=5.0)
     s = summarize_trace(trace, cfg)
     assert s.n_events == 0
-    assert np.isnan(s.decay_tau)
+    assert np.isnan(s.decay_tau_frames)
 
 
 def test_detect_events_counts_separated_pulses():

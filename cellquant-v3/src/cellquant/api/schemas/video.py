@@ -6,7 +6,10 @@ from pydantic import BaseModel
 
 class VideoRunRequest(BaseModel):
     session_id: str
-    mode: Literal["static_roi", "tracked", "whole_field"] = "static_roi"
+    # "tracked" is deliberately absent: the Trackastra wiring (spec 4.3,
+    # plan step 6) is not implemented, and silently running static-ROI
+    # instead would give migrating cells wrong traces with no warning.
+    mode: Literal["static_roi", "whole_field"] = "static_roi"
     condition: Optional[str] = None
     baseline_mode: Literal["fraction", "stim_frame", "auto"] = "fraction"
     baseline_fraction: float = 0.10

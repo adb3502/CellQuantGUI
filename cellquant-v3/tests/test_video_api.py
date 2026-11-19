@@ -32,9 +32,11 @@ def test_build_summary_dataframe_shape():
     from cellquant.tasks.worker import _build_trace_tables
     from cellquant.core.quantification.temporal import TemporalConfig
 
-    stack = np.zeros((20, 4, 4), dtype=np.float64)
-    stack[:] = 100.0
-    stack[5:10, 0, 0] += 50.0
+    # Background 100 everywhere; the cell sits at 200 and rises to 300,
+    # so after background subtraction f0 = 100 and the peak is +100 -> 1.0.
+    stack = np.full((20, 4, 4), 100.0, dtype=np.float64)
+    stack[:, 0, 0] = 200.0
+    stack[5:10, 0, 0] = 300.0
     masks = np.zeros((4, 4), dtype=np.int32)
     masks[0, 0] = 1
 
@@ -42,9 +44,10 @@ def test_build_summary_dataframe_shape():
         stack, masks, condition="Ach", image_set="v1",
         config=TemporalConfig(baseline_fraction=0.10),
     )
-    for col in ("Condition", "ImageSet", "CellID", "Frame", "F_raw", "dF_F0"):
+    for col in ("Condition", "ImageSet", "CellID", "Frame", "F_raw",
+                "F_bg_corrected", "dF_F0"):
         assert col in traces_df.columns
     for col in ("Condition", "ImageSet", "CellID", "peak_dF_F0", "peak_frame"):
         assert col in summary_df.columns
     assert len(traces_df) == 20
-    assert summary_df.iloc[0]["peak_dF_F0"] == pytest.approx(0.5)
+    assert summary_df.iloc[0]["peak_dF_F0"] == pytest.approx(1.0)

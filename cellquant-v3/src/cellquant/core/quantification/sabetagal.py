@@ -84,11 +84,27 @@ def otsu_threshold(values: np.ndarray) -> float:
 
     values = np.asarray(values, dtype=np.float64)
     values = values[np.isfinite(values)]
-    if values.size == 0:
-        return 0.0
+    if values.size < 4:
+        return float("nan")
     if np.allclose(values, values[0]):
-        return float(values[0])
-    return float(threshold_otsu(values))
+        return float("nan")
+
+    t = float(threshold_otsu(values))
+
+    # Otsu always returns a cut, even for unimodal data: on an all-negative
+    # control it splits noise in half and reports ~50% positive. Require real
+    # separation between the two groups before trusting it.
+    lo, hi = values[values <= t], values[values > t]
+    if lo.size == 0 or hi.size == 0:
+        return float("nan")
+    spread = float(values.max() - values.min())
+    separation = float(hi.mean() - lo.mean())
+    # Measured: unimodal noise gives a separation/spread ratio near 0.35,
+    # a genuinely bimodal distribution near 1.0. 0.6 sits between them.
+    if spread <= 0 or separation < 0.6 * spread:
+        # Not convincingly bimodal - refuse rather than fabricate positives.
+        return float("nan")
+    return t
 
 
 def quantify_sabetagal(rgb: np.ndarray, masks: np.ndarray,
@@ -101,7 +117,14 @@ def quantify_sabetagal(rgb: np.ndarray, masks: np.ndarray,
     masks = np.asarray(masks)
 
     white = estimate_white_reference(rgb, config.white_percentile)
-    od = compute_optical_density(rgb, white)
+    # Colour deconvolution isolates the chromogen; total-darkness OD would
+    # also count dark nuclei, debris and out-of-focus material as stain.
+    # Fall back to total OD only if deconvolution is unavailable.
+    try:
+        od = deconvolve_chromogen(rgb, config)
+    except Exception as exc:
+        print(f"Colour deconvolution failed ({exc}); using total optical density")
+        od = compute_optical_density(rgb, white)
 
     labels = np.unique(masks)
     labels = labels[labels > 0]
@@ -112,8 +135,20 @@ def quantify_sabetagal(rgb: np.ndarray, masks: np.ndarray,
     mean_od = np.atleast_1d(ndimage.mean(od, labels=masks, index=labels))
     areas = np.atleast_1d(ndimage.sum(np.ones_like(od), labels=masks, index=labels))
 
-    threshold = (config.threshold if config.threshold is not None
-                 else otsu_threshold(mean_od))
+    if config.threshold is not None:
+        threshold = float(config.threshold)
+        threshold_source = "user"
+    else:
+        threshold = otsu_threshold(mean_od)
+        threshold_source = "otsu"
+
+    if not np.isfinite(threshold):
+        # No defensible cut: classify nothing rather than invent positives.
+        # The caller sees threshold_source == "undecidable".
+        is_positive = np.zeros(len(labels), dtype=bool)
+        threshold_source = "undecidable"
+    else:
+        is_positive = mean_od > threshold
 
     df = pd.DataFrame({
         "Condition": condition,
@@ -122,7 +157,9 @@ def quantify_sabetagal(rgb: np.ndarray, masks: np.ndarray,
         "Area": areas.astype(float),
         "mean_OD": mean_od.astype(float),
         "integrated_OD": (mean_od * areas).astype(float),
-        "is_positive": (mean_od > threshold),
+        "is_positive": is_positive,
+        "threshold_used": threshold,
+        "threshold_source": threshold_source,
     })
     df.attrs["threshold"] = float(threshold)
     return df[df["Area"] >= config.min_area].reset_index(drop=True)

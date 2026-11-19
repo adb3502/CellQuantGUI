@@ -19,10 +19,23 @@ _UNIT_TO_MOLAR = {
 # filenames read "Ach 1 uM_XY1222807246_Z0_T000_C0", and '_' is a word
 # character, so \b does not match after "uM" and the dose is missed.
 _UNIT_END = r"(?![A-Za-z])"
+
+# PREFIXED units (mM/uM/nM/pM) are accepted in any case, because real
+# filenames write "100nm" meaning nanomolar and "epi1uM" with no separator.
+# "nm"/"um" are formally ambiguous with nanometres/micrometres, but a bare
+# length in a dose-series filename is far less likely than a concentration,
+# and the confirmation gate shows the user what was parsed.
+#
+# A BARE unit must be an uppercase "M". Lowercase "m" alone is far more often
+# minutes, a well id or a size ("plate_5m", "Img_3mm", "well_30m"); reading
+# those as 5 M / 3 mM / 30 M would feed junk dose points into the EC50 fit.
+#
+# The lookbehind stops a match starting mid-number, so "T000"/"Z0" cannot
+# produce a dose.
 _DOSE_RE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(mM|uM|µM|nM|pM|M|mm|um|µm|nm|pm|m)" + _UNIT_END,
-    re.IGNORECASE)
-_VOLUME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ul|µl|uL)" + _UNIT_END, re.IGNORECASE)
+    r"(?<![0-9.])(\d+(?:\.\d+)?)\s*((?:[mM][mM]|[uUµ][mM]|[nN][mM]|[pP][mM]|M))" + _UNIT_END)
+_VOLUME_RE = re.compile(
+    r"(?<![0-9.])(\d+(?:\.\d+)?)\s*([uUµ][lL])" + _UNIT_END)
 
 
 @dataclass
@@ -62,6 +75,15 @@ def parse_dose(name: str) -> ParsedDose:
     result.value = value
     result.unit = match.group(2)
     result.molar = value * factor
+
+    # Lowercase "mm"/"um"/"nm" are formally ambiguous with millimetres /
+    # micrometres / nanometres. We read them as concentrations because that is
+    # the usual intent in a dose series, but flag them so the confirmation gate
+    # puts them in front of the user instead of quietly fitting them.
+    if match.group(2).lower() in ("mm", "um", "nm", "pm"):
+        result.ambiguous = True
+        result.note = (f"Read {match.group(2)!r} as a concentration; it could "
+                       "also be a length - confirm before fitting")
     return result
 
 

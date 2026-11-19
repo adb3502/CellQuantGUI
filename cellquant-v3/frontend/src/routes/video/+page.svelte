@@ -98,7 +98,6 @@
 			Mode
 			<select bind:value={$videoMode}>
 				<option value="static_roi">Static ROI (segment once)</option>
-				<option value="tracked">Tracked (cells move)</option>
 				<option value="whole_field">Whole field (no segmentation)</option>
 			</select>
 		</label>
