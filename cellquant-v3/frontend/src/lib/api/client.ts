@@ -825,3 +825,69 @@ export async function healthCheck(): Promise<{ status: string; version: string }
 	const res = await fetch('/api/health');
 	return res.json();
 }
+
+// ---- Video analytics ----
+
+export interface VideoRunParams {
+	mode?: 'static_roi' | 'tracked' | 'whole_field';
+	condition?: string;
+	baseline_mode?: 'fraction' | 'stim_frame' | 'auto';
+	baseline_fraction?: number;
+	stim_frame?: number | null;
+	interval_s?: number | null;
+	detrend?: boolean;
+	event_threshold_sigma?: number;
+	event_refractory_frames?: number;
+	diameter?: number;
+}
+
+export async function runVideo(
+	sessionId: string,
+	params: VideoRunParams
+): Promise<{ task_id: string }> {
+	return request(`/video/run`, {
+		method: 'POST',
+		body: JSON.stringify({ session_id: sessionId, ...params })
+	});
+}
+
+export async function getVideoSummary(sessionId: string): Promise<any> {
+	return request(`/video/summary/${sessionId}`);
+}
+
+export async function getVideoTraces(sessionId: string, condition: string): Promise<any> {
+	return request(`/video/traces/${sessionId}/${encodeURIComponent(condition)}`);
+}
+
+export async function parseDoses(sessionId: string): Promise<any> {
+	return request(`/video/parse-doses/${sessionId}`);
+}
+
+// ---- SA-beta-gal analytics ----
+
+export interface SABetaGalRunParams {
+	condition?: string;
+	white_percentile?: number;
+	chromogen_index?: number;
+	threshold?: number | null;
+	min_area?: number;
+	diameter?: number;
+}
+
+export async function runSABetaGal(
+	sessionId: string,
+	params: SABetaGalRunParams
+): Promise<{ task_id: string }> {
+	return request(`/sabetagal/run`, {
+		method: 'POST',
+		body: JSON.stringify({ session_id: sessionId, ...params })
+	});
+}
+
+export async function getSABetaGalSummary(sessionId: string): Promise<any> {
+	return request(`/sabetagal/summary/${sessionId}`);
+}
+
+export async function getSABetaGalResults(sessionId: string): Promise<any> {
+	return request(`/sabetagal/results/${sessionId}`);
+}
