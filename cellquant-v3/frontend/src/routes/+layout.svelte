@@ -56,6 +56,8 @@
 		'/experiment': 'Experiment Setup',
 		'/segmentation': 'Segmentation',
 		'/tracking': 'Cell Tracking',
+		'/video': 'Video Analytics',
+		'/sabetagal': 'SA-β-gal Analytics',
 		'/editor': 'Mask Editor',
 		'/training': 'Model Training',
 		'/quantification': 'Quantification',

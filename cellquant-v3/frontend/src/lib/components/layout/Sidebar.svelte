@@ -11,6 +11,8 @@
 		ScrollText,
 		Brain,
 		Layers,
+		Film,
+		Droplet,
 		Shield,
 		PanelLeftClose,
 		PanelLeftOpen
@@ -21,6 +23,8 @@
 		{ href: '/experiment', label: 'Experiment', icon: FlaskConical },
 		{ href: '/segmentation', label: 'Analysis', icon: Microscope },
 		{ href: '/tracking', label: 'Tracking', icon: Route },
+		{ href: '/video', label: 'Video', icon: Film },
+		{ href: '/sabetagal', label: 'SA-β-gal', icon: Droplet },
 		{ href: '/editor', label: 'Mask Editor', icon: PenTool },
 		{ href: '/training', label: 'Training', icon: Brain },
 		{ href: '/quantification', label: 'Quantification', icon: Calculator },
