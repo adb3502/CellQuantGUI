@@ -15,9 +15,14 @@ _UNIT_TO_MOLAR = {
     "m": 1e0, "mm": 1e-3, "um": 1e-6, "µm": 1e-6, "nm": 1e-9, "pm": 1e-12,
 }
 
-_DOSE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(mM|uM|µM|nM|pM|M|mm|um|µm|nm|pm|m)\b",
-                      re.IGNORECASE)
-_VOLUME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ul|µl|uL)\b", re.IGNORECASE)
+# A unit must be followed by a non-letter. Plain \b will not do: real
+# filenames read "Ach 1 uM_XY1222807246_Z0_T000_C0", and '_' is a word
+# character, so \b does not match after "uM" and the dose is missed.
+_UNIT_END = r"(?![A-Za-z])"
+_DOSE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(mM|uM|µM|nM|pM|M|mm|um|µm|nm|pm|m)" + _UNIT_END,
+    re.IGNORECASE)
+_VOLUME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ul|µl|uL)" + _UNIT_END, re.IGNORECASE)
 
 
 @dataclass
@@ -88,8 +93,11 @@ class HillFit:
 
 
 def hill_equation(conc, bottom, top, ec50, hill):
+    """4-parameter Hill. The base is kept positive so curve_fit cannot wander
+    into (negative) ** (fractional), which yields NaN and poisons the fit."""
     conc = np.asarray(conc, dtype=np.float64)
-    return bottom + (top - bottom) / (1.0 + (ec50 / np.maximum(conc, 1e-30)) ** hill)
+    ratio = np.maximum(ec50, 1e-30) / np.maximum(conc, 1e-30)
+    return bottom + (top - bottom) / (1.0 + ratio ** hill)
 
 
 def fit_hill(concentrations_m: Sequence[float], responses: Sequence[float]) -> HillFit:

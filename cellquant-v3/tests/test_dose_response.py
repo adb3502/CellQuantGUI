@@ -55,3 +55,25 @@ def test_fit_hill_refuses_with_too_few_points():
     fit = fit_hill(np.array([1e-6, 1e-5]), np.array([0.1, 0.5]))
     assert fit.success is False
     assert "insufficient" in fit.message.lower()
+
+
+@pytest.mark.parametrize("stem,molar", [
+    ("Ach 1 uM_XY1222807246_Z0_T000_C0", 1e-6),
+    ("Ach 10 uM_XY1222806562_Z0_T000_C0", 1e-5),
+    ("Ach 100 uM_XY1222805007_Z0_T000_C0", 1e-4),
+    ("Ach 100nm_XY1222808711_Z0_T000_C0", 1e-7),
+    ("Ach 10mM_XY1222803278_Z0_T000_C0", 1e-2),
+    ("epi 100uM_XY1223228405_Z0_T000_C0", 1e-4),
+    ("epi1uM_XY1223230294_Z0_T000_C0", 1e-6),
+])
+def test_parse_full_filename_stems(stem, molar):
+    """Real stems have _XY... after the dose; \b fails before '_'."""
+    d = parse_dose(stem)
+    assert d.parsed is True, f"{stem!r} failed to parse"
+    assert d.molar == pytest.approx(molar, rel=1e-9)
+
+
+def test_volume_suffix_in_full_stem():
+    a = parse_dose("Ach 1mM- 5ul_XY1222804203_Z0_T000_C0")
+    assert a.molar == pytest.approx(1e-3)
+    assert a.volume_ul == pytest.approx(5.0)
