@@ -40,3 +40,30 @@ def test_ach_raw_trace_matches_measured_values():
     assert means[:10].mean() == pytest.approx(684.2, abs=1.0)
     assert int(means.argmax()) == 18
     assert means.max() == pytest.approx(758.7, abs=1.0)
+
+
+from cellquant.core.quantification.temporal import TemporalConfig, summarize_trace
+
+EPI = REAL_DATA / "Epi" / "epi 100uM_XY1223228405_Z0_T000_C0.tif"
+
+requires_epi = pytest.mark.skipif(not EPI.exists(), reason="Epi data not available")
+
+
+@requires_real_data
+def test_whole_field_ach_matches_spec_targets():
+    """Spec section 8: Ach 1 uM -> peak dF/F0 ~0.109 at frame 18."""
+    arr, _ = load_timelapse(ACH)
+    trace = np.asarray(arr, dtype=np.float64).reshape(arr.shape[0], -1).mean(axis=1)
+    s = summarize_trace(trace, TemporalConfig(baseline_fraction=0.10))
+    assert s.peak_frame == 18
+    assert s.peak_dff == pytest.approx(0.109, abs=0.005)
+
+
+@requires_epi
+def test_whole_field_epi_matches_spec_targets():
+    """Spec section 8: epi 100uM -> peak dF/F0 ~0.051 at frame 35."""
+    arr, _ = load_timelapse(EPI)
+    trace = np.asarray(arr, dtype=np.float64).reshape(arr.shape[0], -1).mean(axis=1)
+    s = summarize_trace(trace, TemporalConfig(baseline_fraction=0.10))
+    assert s.peak_frame == 35
+    assert s.peak_dff == pytest.approx(0.051, abs=0.005)
