@@ -42,6 +42,13 @@ class Session:
     # Results
     results_df: Optional[pd.DataFrame] = None
 
+    # Video analytics
+    traces_df: Optional[pd.DataFrame] = None
+    trace_summary_df: Optional[pd.DataFrame] = None
+
+    # SA-beta-gal analytics
+    sabetagal_df: Optional[pd.DataFrame] = None
+
     @property
     def edit_history(self):
         """Lazy-init edit history."""

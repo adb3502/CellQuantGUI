@@ -903,3 +903,144 @@ def run_tracking_task(
 
     n_tracks = len(set(masks_tracked[masks_tracked > 0].flatten()))
     return {"n_tracks": n_tracks, "n_frames": len(sorted_names)}
+
+
+def _build_trace_tables(stack, masks, condition, image_set, config):
+    """Build the long traces table and the per-cell summary table."""
+    import numpy as np
+    import pandas as pd
+
+    from cellquant.core.quantification.temporal import (
+        compute_baseline,
+        compute_dff,
+        extract_traces,
+        summarize_trace,
+    )
+
+    traces = extract_traces(stack, masks)
+    trace_rows = []
+    summary_rows = []
+
+    for cell_id, trace in sorted(traces.items()):
+        f0 = compute_baseline(trace, config)
+        dff = compute_dff(trace, f0)
+        summary = summarize_trace(trace, config, cell_id=cell_id)
+
+        for frame, (raw, d) in enumerate(zip(trace, dff)):
+            trace_rows.append({
+                "Condition": condition,
+                "ImageSet": image_set,
+                "CellID": int(cell_id),
+                "Frame": int(frame),
+                "Time_s": frame * config.interval_s if config.interval_s else None,
+                "F_raw": float(raw),
+                "dF_F0": float(d),
+            })
+
+        summary_rows.append({
+            "Condition": condition,
+            "ImageSet": image_set,
+            "CellID": int(cell_id),
+            "baseline_f0": summary.baseline_f0,
+            "peak_dF_F0": summary.peak_dff,
+            "peak_frame": summary.peak_frame,
+            "time_to_peak_s": summary.time_to_peak_s,
+            "auc": summary.auc,
+            "rise_time_10_90": summary.rise_time_10_90,
+            "decay_tau": summary.decay_tau,
+            "snr": summary.snr,
+            "n_events": summary.n_events,
+            "event_freq_hz": summary.event_freq_hz,
+        })
+
+    return pd.DataFrame(trace_rows), pd.DataFrame(summary_rows)
+
+
+def run_video_task(task, queue, session, video_params: dict) -> dict:
+    """Analyse time-lapse videos: traces, response metrics, dose-response."""
+    import numpy as np
+    import pandas as pd
+
+    from cellquant.core.io.image_loader import load_timelapse, normalize_image
+    from cellquant.core.quantification.temporal import TemporalConfig
+
+    config = TemporalConfig(
+        baseline_mode=video_params.get("baseline_mode", "fraction"),
+        baseline_fraction=video_params.get("baseline_fraction", 0.10),
+        stim_frame=video_params.get("stim_frame"),
+        interval_s=video_params.get("interval_s"),
+        detrend=video_params.get("detrend", False),
+        event_threshold_sigma=video_params.get("event_threshold_sigma", 3.0),
+        event_refractory_frames=video_params.get("event_refractory_frames", 5),
+    )
+    mode = video_params.get("mode", "static_roi")
+    only_condition = video_params.get("condition")
+
+    targets = []
+    for cond_name, cond in session.conditions.items():
+        if only_condition and cond_name != only_condition:
+            continue
+        for base_name, channels in cond.get("image_sets", {}).items():
+            path = next(iter(channels.values()))
+            targets.append((cond_name, base_name, path))
+
+    queue.update_progress(task, current=0, total=len(targets) or 1,
+                          stage="video", message="Starting video analysis")
+
+    all_traces, all_summaries = [], []
+
+    for idx, (cond_name, base_name, path) in enumerate(targets):
+        if task.status == "cancelled":
+            break
+
+        queue.update_progress(task, current=idx, total=len(targets), stage="video",
+                              condition=cond_name, image_set=base_name,
+                              message=f"Analysing {base_name}")
+
+        stack, meta = load_timelapse(path)
+        stack = np.asarray(stack, dtype=np.float64)
+
+        if mode == "whole_field":
+            masks = np.ones(stack.shape[1:], dtype=np.int32)
+        else:
+            projection = stack.mean(axis=0)
+            from cellquant.core.segmentation.cellpose_engine import CellposeEngine
+            engine = CellposeEngine(model_type=video_params.get("model_type", "cpsam"))
+            result = engine.segment_single(
+                normalize_image(projection),
+                diameter=video_params.get("diameter", 30.0),
+            )
+            masks = result.masks
+            print(f"{base_name}: segmented {result.n_cells} cells on projection")
+
+        traces_df, summary_df = _build_trace_tables(
+            stack, masks, cond_name, base_name, config
+        )
+        all_traces.append(traces_df)
+        all_summaries.append(summary_df)
+
+    traces_df = pd.concat(all_traces, ignore_index=True) if all_traces else pd.DataFrame()
+    summary_df = (pd.concat(all_summaries, ignore_index=True)
+                  if all_summaries else pd.DataFrame())
+
+    session.traces_df = traces_df
+    session.trace_summary_df = summary_df
+
+    try:
+        results_dir = session.directory / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if not traces_df.empty:
+            traces_df.to_parquet(results_dir / "video_traces.parquet")
+            summary_df.to_parquet(results_dir / "video_summary.parquet")
+            summary_df.to_csv(results_dir / "video_summary.csv", index=False)
+    except Exception as exc:
+        print(f"Warning: could not persist video results: {exc}")
+
+    queue.update_progress(task, current=len(targets), total=len(targets) or 1,
+                          stage="video", message="Video analysis complete")
+
+    return {
+        "videos_processed": len(targets),
+        "cells_analysed": int(summary_df["CellID"].count()) if not summary_df.empty else 0,
+        "conditions": sorted({c for c, _, _ in targets}),
+    }
