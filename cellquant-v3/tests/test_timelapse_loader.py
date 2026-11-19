@@ -45,3 +45,25 @@ def test_interval_is_never_inferred(stack_path):
     """Frame interval is user-supplied; the loader must leave it unset."""
     _, meta = load_timelapse(stack_path)
     assert meta.interval_s is None
+
+
+def test_loaded_file_is_released_once_the_array_is_dropped(tmp_path):
+    """load_timelapse memory-maps by default, which holds an OS handle on the
+    file for as long as the returned array is referenced. On Windows that
+    makes the source file undeletable while a run is in progress.
+
+    Dropping the array must release it. Callers that need the file free
+    while still holding the data (as run_video_task does, since it converts
+    to float64 immediately) should pass memmap=False or copy."""
+    import os
+
+    p = tmp_path / "closeme.tif"
+    tifffile.imwrite(p, np.full((6, 8, 8), 100, dtype=np.uint16))
+
+    arr, _ = load_timelapse(p)
+    assert arr.shape == (6, 8, 8)
+    del arr
+
+    # Must be deletable: fails with PermissionError if a handle is held.
+    os.unlink(p)
+    assert not p.exists()
