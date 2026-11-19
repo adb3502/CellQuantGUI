@@ -480,8 +480,11 @@ before and after. `load_image` is untouched; new loaders are additive.
 ## 12. Open questions
 
 1. **SA-β-gal sample images** — needed to close §9.2. None currently on disk.
-2. **`1mM- 5ul` vs `1mM- 50ul`** — same concentration, different volume. Are these
-   distinct experimental conditions, or replicates? Affects dose-response grouping.
+2. ~~**`1mM- 5ul` vs `1mM- 50ul`**~~ — **RESOLVED 2026-11-19: distinct conditions.**
+   Implemented as `ParsedDose.group_key`, which includes the delivered volume
+   (`0.001@5ul` vs `0.001@50ul`) so the two never collapse into one dose point.
+   `fit_hill` refuses a series containing duplicate concentrations rather than
+   fitting two responses at the same x.
 3. **Stimulus timing** — is agonist added at a consistent frame across the Vasu IX83
    series? The two measured files peak at frames 18 and 35, which may reflect genuine
    kinetic differences or different addition times.
