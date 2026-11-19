@@ -336,3 +336,93 @@ def find_images_by_suffix(
             grouped[base_name][suffix.upper()] = file
 
     return grouped
+
+
+@dataclass
+class TimelapseMeta:
+    """Metadata for a multi-frame time-lapse acquisition."""
+
+    path: Path
+    n_frames: int
+    shape: Tuple[int, int]
+    dtype: str
+    channel_name: Optional[str] = None
+    objective: Optional[str] = None
+    interval_s: Optional[float] = None  # user-supplied; never inferred
+    size_bytes: int = 0
+
+
+def _read_slidebook_tags(tif) -> Tuple[Optional[str], Optional[str]]:
+    """Pull channel name / objective from SlideBook private TIFF tags."""
+    channel_name = objective = None
+    try:
+        page = tif.pages[0]
+        tag = page.tags.get(65004)
+        if tag is not None:
+            channel_name = str(tag.value).strip() or None
+        tag = page.tags.get(65003)
+        if tag is not None:
+            objective = str(tag.value).strip() or None
+    except Exception:
+        pass
+    return channel_name, objective
+
+
+def load_timelapse(
+    image_path: Union[str, Path],
+    *,
+    channel: Optional[int] = None,
+    memmap: bool = True,
+) -> Tuple[np.ndarray, TimelapseMeta]:
+    """Load a multi-frame TIFF as a (T, Y, X) stack.
+
+    Unlike load_image(), this never collapses the leading axis.
+    """
+    import tifffile
+
+    image_path = Path(image_path)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    with tifffile.TiffFile(str(image_path)) as tif:
+        channel_name, objective = _read_slidebook_tags(tif)
+        arr = tifffile.memmap(str(image_path)) if memmap else tif.asarray()
+
+    arr = np.asarray(arr)
+
+    if arr.ndim == 2:
+        arr = arr[np.newaxis, ...]
+    elif arr.ndim == 4:
+        # (T, C, Y, X) or (T, Y, X, C) -> pick a channel
+        idx = 0 if channel is None else channel
+        if arr.shape[1] <= 5:
+            arr = arr[:, idx, :, :]
+        elif arr.shape[-1] <= 5:
+            arr = arr[:, :, :, idx]
+        else:
+            raise ValueError(f"Cannot interpret 4-D shape {arr.shape}")
+    elif arr.ndim != 3:
+        raise ValueError(f"Unsupported dimensionality {arr.ndim} for {image_path}")
+
+    meta = TimelapseMeta(
+        path=image_path,
+        n_frames=int(arr.shape[0]),
+        shape=(int(arr.shape[1]), int(arr.shape[2])),
+        dtype=str(arr.dtype),
+        channel_name=channel_name,
+        objective=objective,
+        interval_s=None,
+        size_bytes=image_path.stat().st_size,
+    )
+    return arr, meta
+
+
+def is_timelapse_candidate(image_path: Union[str, Path], min_frames: int = 2) -> bool:
+    """True when a TIFF holds enough frames to be treated as a time series."""
+    import tifffile
+
+    try:
+        with tifffile.TiffFile(str(image_path)) as tif:
+            return len(tif.pages) >= min_frames
+    except Exception:
+        return False
