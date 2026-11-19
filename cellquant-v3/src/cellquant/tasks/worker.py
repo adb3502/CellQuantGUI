@@ -1044,3 +1044,95 @@ def run_video_task(task, queue, session, video_params: dict) -> dict:
         "cells_analysed": int(summary_df["CellID"].count()) if not summary_df.empty else 0,
         "conditions": sorted({c for c, _, _ in targets}),
     }
+
+
+def run_sabetagal_task(task, queue, session, sabetagal_params: dict) -> dict:
+    """Quantify SA-beta-gal brightfield staining and merge into results."""
+    import numpy as np
+    import pandas as pd
+
+    from cellquant.core.io.image_loader import load_rgb, normalize_image
+    from cellquant.core.quantification.sabetagal import (
+        SABetaGalConfig,
+        quantify_sabetagal,
+        summarize_positivity,
+    )
+
+    config = SABetaGalConfig(
+        white_percentile=sabetagal_params.get("white_percentile", 95.0),
+        chromogen_index=sabetagal_params.get("chromogen_index", 0),
+        threshold=sabetagal_params.get("threshold"),
+        stain_vectors=sabetagal_params.get("stain_vectors"),
+        min_area=sabetagal_params.get("min_area", 10),
+    )
+    only_condition = sabetagal_params.get("condition")
+
+    targets = []
+    for cond_name, cond in session.conditions.items():
+        if only_condition and cond_name != only_condition:
+            continue
+        for base_name, channels in cond.get("image_sets", {}).items():
+            targets.append((cond_name, base_name, next(iter(channels.values()))))
+
+    queue.update_progress(task, current=0, total=len(targets) or 1,
+                          stage="sabetagal", message="Starting SA-beta-gal analysis")
+
+    frames = []
+    for idx, (cond_name, base_name, path) in enumerate(targets):
+        if task.status == "cancelled":
+            break
+
+        queue.update_progress(task, current=idx, total=len(targets),
+                              stage="sabetagal", condition=cond_name,
+                              image_set=base_name, message=f"Analysing {base_name}")
+
+        rgb = load_rgb(path)
+
+        masks = session.masks.get(cond_name, {}).get(base_name)
+        if masks is None:
+            from cellquant.core.segmentation.cellpose_engine import CellposeEngine
+            gray = 255.0 - np.asarray(rgb, dtype=np.float64).mean(axis=-1)
+            engine = CellposeEngine(
+                model_type=sabetagal_params.get("model_type", "cyto3"))
+            result = engine.segment_single(
+                normalize_image(gray),
+                diameter=sabetagal_params.get("diameter", 30.0),
+            )
+            masks = result.masks
+            print(f"{base_name}: segmented {result.n_cells} cells")
+
+        frames.append(quantify_sabetagal(rgb, masks, config, cond_name, base_name))
+
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    session.sabetagal_df = df
+
+    summary = summarize_positivity(df)
+
+    try:
+        results_dir = session.directory / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if not df.empty:
+            df.to_parquet(results_dir / "sabetagal_results.parquet")
+            summary.to_csv(results_dir / "sabetagal_summary.csv", index=False)
+    except Exception as exc:
+        print(f"Warning: could not persist SA-beta-gal results: {exc}")
+
+    if not df.empty and session.results_df is not None:
+        try:
+            keys = ["Condition", "ImageSet", "CellID"]
+            session.results_df = session.results_df.merge(
+                df[keys + ["mean_OD", "integrated_OD", "is_positive"]],
+                on=keys, how="left",
+            )
+        except Exception as exc:
+            print(f"Warning: merge into results_df failed: {exc}")
+
+    queue.update_progress(task, current=len(targets), total=len(targets) or 1,
+                          stage="sabetagal", message="SA-beta-gal analysis complete")
+
+    return {
+        "images_processed": len(targets),
+        "total_cells": int(len(df)),
+        "summary": summary.to_dict(orient="records"),
+        "provisional": True,  # uncalibrated stain vectors - see spec 9.2
+    }

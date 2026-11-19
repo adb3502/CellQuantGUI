@@ -20,6 +20,7 @@ from cellquant.api.routers import (
     segmentation,
     tracking,
     video,
+    sabetagal,
     training,
     ws,
 )
@@ -148,6 +149,7 @@ def create_app() -> FastAPI:
     app.include_router(segmentation.router, prefix=prefix)
     app.include_router(tracking.router, prefix=prefix)
     app.include_router(video.router, prefix=prefix)
+    app.include_router(sabetagal.router, prefix=prefix)
     app.include_router(masks.router, prefix=prefix)
     app.include_router(nellie.router, prefix=prefix)
     app.include_router(quantification.router, prefix=prefix)
