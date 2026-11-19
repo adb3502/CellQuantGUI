@@ -386,7 +386,17 @@ def load_timelapse(
 
     with tifffile.TiffFile(str(image_path)) as tif:
         channel_name, objective = _read_slidebook_tags(tif)
-        arr = tifffile.memmap(str(image_path)) if memmap else tif.asarray()
+        arr = None
+        if memmap:
+            # Not every TIFF is mappable: SlideBook writes one strip per
+            # frame, which tifffile cannot memory-map. Fall back to a
+            # normal read rather than failing the load.
+            try:
+                arr = tifffile.memmap(str(image_path))
+            except (ValueError, MemoryError):
+                arr = None
+        if arr is None:
+            arr = tif.asarray()
 
     arr = np.asarray(arr)
 
