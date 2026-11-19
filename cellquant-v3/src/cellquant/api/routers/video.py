@@ -65,6 +65,7 @@ async def parse_doses(session_id: str):
         ParsedDoseOut(
             source=d.source, parsed=d.parsed, molar=d.molar, unit=d.unit,
             volume_ul=d.volume_ul, ambiguous=d.ambiguous, note=d.note,
+            group_key=d.group_key,
         )
         for d in doses
     ]

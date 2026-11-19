@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from cellquant.core.quantification.dose_response import parse_dose
+from cellquant.core.quantification.dose_response import fit_hill, parse_dose
 from cellquant.core.quantification.sabetagal import (
     SABetaGalConfig, otsu_threshold, quantify_sabetagal)
 from cellquant.core.quantification.temporal import (
@@ -147,3 +147,43 @@ def test_tracked_mode_is_rejected_until_implemented():
     VideoRunRequest(session_id="s", mode="whole_field")
     with pytest.raises(ValidationError):
         VideoRunRequest(session_id="s", mode="tracked")
+
+
+# --- volume variants are DISTINCT conditions (user-confirmed 2026-11-19) ---
+
+def test_volume_variants_get_distinct_group_keys():
+    """'1mM- 5ul' and '1mM- 50ul' are the same concentration delivered at
+    different volumes, and the user confirmed they are distinct conditions.
+    They must not collapse to one dose point."""
+    from cellquant.core.quantification.dose_response import fit_hill, parse_dose_table
+
+    doses = parse_dose_table(["Ach 1mM- 5ul", "Ach 1mM- 50ul"])
+    assert doses[0].group_key != doses[1].group_key
+    assert doses[0].molar == doses[1].molar
+
+
+def test_plain_concentration_has_a_volume_free_group_key():
+    from cellquant.core.quantification.dose_response import fit_hill, parse_dose_table
+
+    d = parse_dose_table(["Ach 1 uM"])[0]
+    assert d.group_key == "1e-06"
+
+
+def test_unambiguous_units_are_not_flagged():
+    """Flagging every dose makes the confirmation gate meaningless. Only
+    genuinely length-ambiguous lowercase units should be flagged."""
+    from cellquant.core.quantification.dose_response import fit_hill, parse_dose_table
+
+    doses = parse_dose_table(["Ach 1 uM", "Ach 10 uM", "Ach 100 uM"])
+    assert not any(d.ambiguous for d in doses), \
+        "uM is unambiguous - flagging it buries the real warnings"
+
+
+def test_fit_hill_rejects_duplicate_concentrations():
+    """Two distinct conditions at the same molarity are not two dose points;
+    fitting them as such distorts the curve."""
+    conc = np.array([1e-7, 1e-6, 1e-5, 1e-3, 1e-3, 1e-2])
+    resp = np.array([0.06, 0.11, 0.21, 0.48, 0.06, 0.04])
+    fit = fit_hill(conc, resp)
+    assert fit.success is False
+    assert "duplicate" in fit.message.lower()

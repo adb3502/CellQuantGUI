@@ -34,6 +34,7 @@ class ParsedDoseOut(BaseModel):
     volume_ul: Optional[float] = None
     ambiguous: bool = False
     note: str = ""
+    group_key: str = ""
 
 
 class DoseTableResponse(BaseModel):

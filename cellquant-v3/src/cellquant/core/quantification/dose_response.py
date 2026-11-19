@@ -48,6 +48,10 @@ class ParsedDose:
     volume_ul: Optional[float] = None
     ambiguous: bool = False
     note: str = ""
+    # Identity for grouping/fitting. Two conditions at the same molarity but
+    # different delivered volume are DISTINCT (user-confirmed), so the volume
+    # is part of the key and they never collapse into one dose point.
+    group_key: str = ""
 
 
 def parse_dose(name: str) -> ParsedDose:
@@ -80,11 +84,23 @@ def parse_dose(name: str) -> ParsedDose:
     # micrometres / nanometres. We read them as concentrations because that is
     # the usual intent in a dose series, but flag them so the confirmation gate
     # puts them in front of the user instead of quietly fitting them.
-    if match.group(2).lower() in ("mm", "um", "nm", "pm"):
+    raw_unit = match.group(2)
+    if raw_unit in ("mm", "um", "nm", "pm"):  # all-lowercase only
         result.ambiguous = True
-        result.note = (f"Read {match.group(2)!r} as a concentration; it could "
+        result.note = (f"Read {raw_unit!r} as a concentration; it could "
                        "also be a length - confirm before fitting")
+
+    result.group_key = _make_group_key(result)
     return result
+
+
+def _make_group_key(d: "ParsedDose") -> str:
+    """Identity used for grouping and for dose-response x values."""
+    if not d.parsed or d.molar is None:
+        return d.source
+    if d.volume_ul is not None:
+        return f"{d.molar:g}@{d.volume_ul:g}ul"
+    return f"{d.molar:g}"
 
 
 def parse_dose_table(names: Sequence[str]) -> List[ParsedDose]:
@@ -98,9 +114,17 @@ def parse_dose_table(names: Sequence[str]) -> List[ParsedDose]:
         if len(group) > 1:
             volumes = {d.volume_ul for d in group}
             if len(volumes) > 1:
+                # Same molarity, different delivered volume. These are
+                # distinct conditions, so they keep distinct group_keys and
+                # are NOT flagged - the note records why they are separate.
+                for d in group:
+                    d.note = ("Same concentration, different volume - treated "
+                              "as a distinct condition")
+            elif len({d.source for d in group}) > 1:
+                # Genuine duplicates: same molarity, same (or no) volume.
                 for d in group:
                     d.ambiguous = True
-                    d.note = "Same concentration, different volume - confirm grouping"
+                    d.note = "Duplicate concentration - confirm these are replicates"
     return doses
 
 
@@ -133,6 +157,13 @@ def fit_hill(concentrations_m: Sequence[float], responses: Sequence[float]) -> H
 
     if len(conc) < 4:
         return HillFit(message="Insufficient data for EC50 (need >= 4 dose points)")
+
+    if len(np.unique(conc)) < len(conc):
+        return HillFit(message=(
+            "Duplicate concentrations in the dose series. Conditions that "
+            "share a molarity (e.g. different delivered volumes) are distinct "
+            "and cannot be fitted as separate dose points - aggregate them or "
+            "fit the series separately."))
 
     p0 = (float(resp.min()), float(resp.max()), float(np.median(conc)), 1.0)
     try:

@@ -161,7 +161,7 @@
 			<h2>Parsed doses - confirm before fitting</h2>
 			<table>
 				<thead>
-					<tr><th>Source</th><th>Parsed</th><th>Molar</th><th>Volume (uL)</th><th>Note</th></tr>
+					<tr><th>Source</th><th>Parsed</th><th>Molar</th><th>Volume (uL)</th><th>Group</th><th>Note</th></tr>
 				</thead>
 				<tbody>
 					{#each $doseTable as d}
@@ -170,6 +170,7 @@
 							<td>{d.parsed ? 'yes' : 'NO'}</td>
 							<td>{d.molar ?? '-'}</td>
 							<td>{d.volume_ul ?? '-'}</td>
+							<td>{d.group_key}</td>
 							<td>{d.note}</td>
 						</tr>
 					{/each}

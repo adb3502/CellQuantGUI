@@ -31,15 +31,20 @@ def test_unparseable_dose_is_reported_not_coerced():
     assert d.molar is None
 
 
-def test_volume_suffix_is_captured_and_flagged_ambiguous():
+def test_volume_suffix_is_captured_and_kept_distinct():
+    """Same molarity, different delivered volume. The user confirmed these
+    are distinct conditions, so they keep separate group keys rather than
+    being flagged for confirmation."""
     a = parse_dose("Ach 1mM- 5ul")
     b = parse_dose("Ach 1mM- 50ul")
     assert a.molar == pytest.approx(1e-3)
     assert b.molar == pytest.approx(1e-3)
     assert a.volume_ul == pytest.approx(5.0)
     assert b.volume_ul == pytest.approx(50.0)
+
     table = parse_dose_table(["Ach 1mM- 5ul", "Ach 1mM- 50ul"])
-    assert all(d.ambiguous for d in table)
+    assert table[0].group_key != table[1].group_key
+    assert not any(d.ambiguous for d in table)
 
 
 def test_fit_hill_recovers_known_ec50():
