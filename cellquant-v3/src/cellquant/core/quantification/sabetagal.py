@@ -70,7 +70,16 @@ def deconvolve_chromogen(rgb: np.ndarray, config: SABetaGalConfig) -> np.ndarray
 
 
 def otsu_threshold(values: np.ndarray) -> float:
-    """Otsu cut on a 1-D set of per-cell values."""
+    """Otsu cut on a 1-D set of per-cell values.
+
+    WARNING: Otsu assumes the values are bimodal. A real plate with many
+    exactly-unstained cells plus a few intensely stained ones violates
+    that assumption, and Otsu can maximise between-class variance INSIDE
+    the stained group - splitting positives from positives and
+    under-reporting percent-positive. Set config.threshold explicitly
+    from a negative control for any result you intend to report.
+    See spec 9.2 and test_otsu_mis_splits_a_skewed_od_distribution.
+    """
     from skimage.filters import threshold_otsu
 
     values = np.asarray(values, dtype=np.float64)

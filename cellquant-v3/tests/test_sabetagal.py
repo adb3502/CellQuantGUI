@@ -91,3 +91,23 @@ def test_load_rgb_preserves_three_channels(tmp_path):
     arr = load_rgb(p)
     assert arr.ndim == 3
     assert arr.shape[-1] == 3
+
+
+
+
+def test_otsu_mis_splits_a_skewed_od_distribution():
+    """Documents a real limitation: Otsu assumes bimodality.
+
+    With many exactly-zero (unstained) cells plus one extreme outlier, the
+    between-class variance is maximised INSIDE the stained group, so Otsu
+    splits positives from positives. This is why spec 9.2 requires
+    calibrating the threshold against a negative control rather than
+    trusting the automatic default.
+    """
+    vals = np.array([0.2209, 0.3227, 0.4815, 2.2997, 0, 0, 0, 0, 0, 0])
+    t = otsu_threshold(vals)
+    n_positive = int((vals > t).sum())
+    assert n_positive == 2, "regression guard: Otsu picks 2, not the true 4"
+
+    # An explicit threshold set from a negative control recovers all four.
+    assert int((vals > 0.05).sum()) == 4
