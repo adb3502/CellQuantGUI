@@ -436,3 +436,30 @@ def is_timelapse_candidate(image_path: Union[str, Path], min_frames: int = 2) ->
             return len(tif.pages) >= min_frames
     except Exception:
         return False
+
+
+def load_rgb(image_path: Union[str, Path]) -> np.ndarray:
+    """Load a brightfield image as true colour (Y, X, 3).
+
+    Unlike load_image(), this never reduces RGB to a single channel.
+    """
+    image_path = Path(image_path)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    try:
+        import tifffile
+        arr = tifffile.imread(str(image_path))
+    except Exception:
+        from skimage import io
+        arr = io.imread(str(image_path))
+
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    elif arr.ndim == 3 and arr.shape[0] in (3, 4) and arr.shape[-1] not in (3, 4):
+        arr = np.moveaxis(arr, 0, -1)
+
+    if arr.ndim != 3 or arr.shape[-1] < 3:
+        raise ValueError(f"Not an RGB image: shape {arr.shape}")
+    return arr[:, :, :3]
