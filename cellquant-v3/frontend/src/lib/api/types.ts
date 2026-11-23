@@ -88,6 +88,8 @@ export interface SegmentationStatus {
 	message: string;
 	elapsed_seconds: number;
 	result?: { total_cells?: number; images_processed?: number };
+	/** Full traceback when status is 'error'. */
+	error?: string | null;
 }
 
 // ── Tracking ─────────────────────────────────────────────

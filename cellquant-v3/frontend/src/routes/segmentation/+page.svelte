@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { Microscope, Play, Square, RotateCcw, ChevronLeft, ChevronRight, ChevronDown, FolderOpen, Calculator, Info, Settings2, Activity } from 'lucide-svelte';
-	import { runSegmentation, cancelSegmentation, maskRenderUrl, openResultFolder, runQuantification, getMaskStatus, runNellie, cancelNellie } from '$api/client';
+	import { runSegmentation, cancelSegmentation, maskRenderUrl, openResultFolder, runQuantification, getMaskStatus, runNellie, cancelNellie, getSegmentationStatus } from '$api/client';
 	import { ProgressSocket } from '$api/websocket';
 	import type { ProgressMessage, QCFilterParams, MaskStatusResponse } from '$api/types';
 	import ConfirmDialog from '$components/ui/ConfirmDialog.svelte';
@@ -141,6 +141,12 @@
 		if (!$sessionId || socket) return;
 		socket = new ProgressSocket($sessionId);
 		socket.onMessage(handleWSMessage);
+		socket.onExhausted(() => {
+			$segRunning = false;
+			$segWsStatus = 'error';
+			$segMessage = 'Connection lost — please re-scan and try again';
+			socket = null;
+		});
 		socket.connect();
 	}
 
@@ -272,6 +278,52 @@
 	let _quantTaskId = '';
 	let _nellieTaskIdLocal = '';
 
+	// The websocket is the primary progress channel, but it is connected AFTER
+	// the run POST returns. A task that fails immediately (e.g. a broken torch
+	// import) emits its terminal event into an empty callback list, and the UI
+	// would sit at "Submitting... 0%" forever. Poll the status endpoint as a
+	// fallback so a missed event can never strand the page.
+	let segPollTimer: ReturnType<typeof setInterval> | null = null;
+
+	function stopSegPoll() {
+		if (segPollTimer !== null) {
+			clearInterval(segPollTimer);
+			segPollTimer = null;
+		}
+	}
+
+	function startSegPoll(taskId: string) {
+		stopSegPoll();
+		segPollTimer = setInterval(async () => {
+			if (!taskId) {
+				stopSegPoll();
+				return;
+			}
+			try {
+				const st = await getSegmentationStatus(taskId);
+				// Only act on terminal states: the websocket owns live progress.
+				if (st.status === 'error' || st.status === 'cancelled') {
+					$segWsStatus = st.status;
+					$segMessage = st.error || st.message || 'Task failed';
+					$segRunning = false;
+					stopSegPoll();
+					disconnectWebSocket();
+				} else if (st.status === 'complete') {
+					$segWsStatus = 'complete';
+					$segRunning = false;
+					stopSegPoll();
+				}
+			} catch {
+				// A 404 means the server no longer knows this task - it cannot
+				// progress, so stop rather than poll a dead id forever.
+				$segWsStatus = 'error';
+				$segMessage = 'Task is no longer known to the server';
+				$segRunning = false;
+				stopSegPoll();
+			}
+		}, 3000);
+	}
+
 	async function doRun(skipExisting: boolean) {
 		if (!$sessionId) return;
 		$segRunning = true;
@@ -316,6 +368,7 @@
 
 			// Connect WS after we have the task_id so filtering works immediately
 			connectWebSocket();
+			startSegPoll(task_id);
 		} catch (e) {
 			$segRunning = false;
 			$segWsStatus = 'error';
@@ -532,6 +585,7 @@
 	});
 
 	onDestroy(() => {
+		stopSegPoll();
 		disconnectWebSocket();
 		quantSocket?.disconnect();
 		quantSocket = null;
