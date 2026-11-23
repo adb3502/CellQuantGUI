@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Optional
 
+from cellquant.core.io.channel_detect import resolve_channel_path
 from cellquant.tasks.queue import TaskInfo, TaskQueue
 
 
@@ -135,7 +136,7 @@ def run_segmentation_task(
                 # Use exactly the channels the user selected for segmentation
                 loaded_channels = []
                 for suffix in seg_suffixes:
-                    ch_path = channels.get(suffix) or channels.get(suffix.upper()) or channels.get(suffix.lower())
+                    ch_path = resolve_channel_path(channels, suffix)
                     if ch_path:
                         img = load_image(ch_path)
                         loaded_channels.append(normalize_image(img))
@@ -149,13 +150,13 @@ def run_segmentation_task(
                     seg_input = np.stack(loaded_channels, axis=0)
             else:
                 # Default: cyto/brightfield channel only
-                cyto_path = channels.get(cyto_suffix) or channels.get(cyto_suffix.upper())
+                cyto_path = resolve_channel_path(channels, cyto_suffix)
                 if cyto_path:
                     cyto_img = load_image(cyto_path)
                     seg_input = normalize_image(cyto_img)
                 else:
                     # Fallback to nuclear if no cyto available
-                    nuc_path = channels.get(nuclear_suffix) or channels.get(nuclear_suffix.upper())
+                    nuc_path = resolve_channel_path(channels, nuclear_suffix)
                     if not nuc_path:
                         processed += 1
                         continue
@@ -216,7 +217,9 @@ def run_segmentation_task(
                 # Build visual composite from all channels (matching v1)
                 channel_imgs = [nuc_img.astype(np.float64)]
                 for suffix, ch_path in channels.items():
-                    if suffix in (nuclear_suffix, nuclear_suffix.upper()):
+                    if nuclear_suffix and suffix in (
+                        nuclear_suffix, nuclear_suffix.upper()
+                    ):
                         continue  # already loaded
                     if ch_path and Path(ch_path).exists():
                         channel_imgs.append(load_image(ch_path).astype(np.float64))
@@ -513,7 +516,7 @@ def run_quantification_task(
             channels = image_sets.get(base_name, {})
             marker_images = {}
             for suffix, name in zip(marker_suffixes, marker_names):
-                path = channels.get(suffix) or channels.get(suffix.upper())
+                path = resolve_channel_path(channels, suffix)
                 if path:
                     img = load_image(path)
                     if has_preprocessing:
@@ -877,7 +880,7 @@ def run_tracking_task(
     imgs_list = []
     for name in sorted_names:
         channels = image_sets.get(name, {})
-        path = channels.get(nuclear_suffix) or channels.get(nuclear_suffix.upper())
+        path = resolve_channel_path(channels, nuclear_suffix)
         if path:
             imgs_list.append(load_image(path))
         else:

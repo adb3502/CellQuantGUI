@@ -486,3 +486,22 @@ def suggest_channel_roles(suffixes: List[str]) -> Dict[str, object]:
     roles["markers"] = remaining  # Everything else is a marker
 
     return roles
+
+
+def resolve_channel_path(channels: dict, suffix) -> Optional[object]:
+    """Look up a channel by suffix, tolerating a missing or absent one.
+
+    A single-channel dataset has no cytoplasm channel, so suggested_cyto is
+    None and the session dict stores the key with value None. Callers used
+    `cond.get("cyto_suffix", "C1")`, but .get only returns its default when the
+    key is ABSENT - a present None came straight through and `suffix.upper()`
+    raised AttributeError, failing the whole segmentation run.
+
+    Returning None for an absent channel is the correct answer, not an error:
+    every call site already branches on a missing cytoplasm channel.
+    """
+    if not suffix:
+        return None
+    return (channels.get(suffix)
+            or channels.get(suffix.upper())
+            or channels.get(suffix.lower()))

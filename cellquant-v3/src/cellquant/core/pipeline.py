@@ -19,6 +19,7 @@ from cellquant.core.io.image_loader import (
     load_image, normalize_image, find_images_by_suffix
 )
 from cellquant.core.io.mask_io import load_mask, save_mask
+from cellquant.core.io.channel_detect import resolve_channel_path
 from cellquant.core.io.roi_export import save_rois_imagej
 from cellquant.core.preprocessing.correction import PreprocessingConfig, correct_image
 from cellquant.core.segmentation.cellpose_engine import (
@@ -316,8 +317,8 @@ class BatchPipeline:
         config = condition.channel_config
 
         # Load nuclear and cytoplasm channels
-        nuclear_path = image_paths.get(config.nuclear_suffix.upper())
-        cyto_path = image_paths.get(config.cyto_suffix.upper())
+        nuclear_path = resolve_channel_path(image_paths, config.nuclear_suffix)
+        cyto_path = resolve_channel_path(image_paths, config.cyto_suffix)
 
         if not nuclear_path:
             print(f"  Warning: No nuclear channel for {base_name}")
@@ -476,8 +477,8 @@ class BatchPipeline:
             image_names = []
 
             for base_name, image_paths in condition.image_sets.items():
-                nuclear_path = image_paths.get(config.nuclear_suffix.upper())
-                cyto_path = image_paths.get(config.cyto_suffix.upper())
+                nuclear_path = resolve_channel_path(image_paths, config.nuclear_suffix)
+                cyto_path = resolve_channel_path(image_paths, config.cyto_suffix)
 
                 if not nuclear_path:
                     continue
