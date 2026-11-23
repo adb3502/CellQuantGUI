@@ -33,9 +33,22 @@ class ImageMetadata:
     size_bytes: int
 
 
+class TimelapseInputError(ValueError):
+    """Raised when a multi-frame time-lapse is passed to a single-image path.
+
+    load_image() used to collapse a 120-frame recording to its middle frame
+    and return it with no warning, so segmentation silently reported a result
+    computed from 1/120th of the data. Failing loudly is the only safe
+    behaviour: a wrong number that looks right is worse than an error.
+    """
+
+
 def load_image(
     image_path: Union[str, Path],
-    channel: Optional[int] = None
+    channel: Optional[int] = None,
+    *,
+    frame: Optional[int] = None,
+    allow_timelapse: bool = False,
 ) -> np.ndarray:
     """
     Load an image with robust multi-dimensional handling.
@@ -65,6 +78,25 @@ def load_image(
         img = io.imread(str(image_path))
     except Exception as e:
         raise IOError(f"Failed to load image {image_path}: {e}")
+
+    # A multi-frame time-lapse must not silently become one frame. Classify
+    # before collapsing: a z-stack keeps the middle-slice behaviour, which is
+    # a legitimate projection, but a recording does not.
+    if img.ndim == 3 and frame is None and not allow_timelapse:
+        from cellquant.core.io.data_type import DataType, probe_file
+
+        info = probe_file(image_path)
+        if info.data_type == DataType.TIMELAPSE:
+            raise TimelapseInputError(
+                f"{image_path.name} is a {info.n_frames}-frame time-lapse, not a "
+                f"single image. Loading it here would use only one frame and "
+                f"discard the other {info.n_frames - 1}. Use Video Analytics to "
+                f"analyse this recording, or pass frame=<n> to read one frame "
+                f"deliberately."
+            )
+
+    if frame is not None and img.ndim == 3:
+        img = img[int(frame)]
 
     # Handle multi-dimensional arrays
     if img.ndim > 2:

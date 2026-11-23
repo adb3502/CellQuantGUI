@@ -129,6 +129,24 @@ def _resolve_container_path(raw_path: str | None) -> Path | None:
 _picker_registry: dict[str, int] = {}
 
 
+
+def _summarise_folder_data_type(folder):
+    """Classify a condition folder as images / time-lapse / z-stacks.
+
+    Header-only: these files are 63 MB each and a scan touches every one, so
+    this never decodes pixel data.
+    """
+    from pathlib import Path
+
+    from cellquant.core.io.data_type import probe_file, summarise_data_types
+
+    folder = Path(folder)
+    files = [f for f in sorted(folder.glob("*"))
+             if f.is_file() and f.suffix.lower() in (".tif", ".tiff")]
+    # A handful is enough to characterise a folder; probing hundreds of
+    # headers would slow the scan for no extra information.
+    return summarise_data_types([probe_file(f) for f in files[:12]])
+
 @router.post("/picker-register")
 async def picker_register(req: dict) -> dict:
     """Called by cellquant-picker.py on startup to register its port.
@@ -158,11 +176,23 @@ async def browse_folder(
 
     username = current_user.username.lower()
     registered_port = _picker_registry.get(username)
+
+    # Shared-workstation fallback: the per-user registry assumes each user has
+    # their own Windows session (RDP), but on a shared lab machine one picker
+    # serves whoever is at the keyboard. If this user has no picker of their
+    # own and exactly one is registered, use it — an ambiguous multi-picker
+    # setup still requires an exact match.
+    if not registered_port and len(_picker_registry) == 1:
+        registered_port = next(iter(_picker_registry.values()))
+
     if not registered_port:
         return {"path": None, "error": "picker_not_running"}
 
+    # The picker runs on the Windows host; inside Docker, reach it via host.docker.internal.
+    # Fall back to 127.0.0.1/localhost for non-Docker (local dev) environments.
+    hosts = ["host.docker.internal", "127.0.0.1", "localhost"]
     async with httpx.AsyncClient(timeout=120.0) as client:
-        for host in ("127.0.0.1", "localhost"):
+        for host in hosts:
             try:
                 resp = await client.post(f"http://{host}:{registered_port}/pick")
                 resp.raise_for_status()
@@ -280,6 +310,7 @@ async def scan_experiment(req: ScanRequest):
         conditions.append(cond)
 
         # Store in session
+        _dt_summary = _summarise_folder_data_type(subdir)
         session.conditions[subdir.name] = {
             "name": subdir.name,
             "path": str(subdir),
@@ -292,6 +323,8 @@ async def scan_experiment(req: ScanRequest):
             "nuclear_suffix": detection.suggested_nuclear,
             "cyto_suffix": detection.suggested_cyto,
             "suggested_markers": detection.suggested_markers,
+            "data_type": _dt_summary.data_type.value,
+            "n_frames": _dt_summary.n_frames_typical,
         }
 
     session.experiment_path = folder
@@ -319,6 +352,17 @@ async def scan_experiment(req: ScanRequest):
                 if inferred:
                     channel_colors[suffix] = inferred
 
+        # Aggregate across ALL conditions: a folder that mixes videos and
+        # stills must say so rather than inherit whatever the first one was.
+        from cellquant.core.io.data_type import DataType, DataTypeInfo, summarise_data_types
+
+        _agg_infos = []
+        for _c in session.conditions.values():
+            _n = int(_c.get("n_frames", 1) or 1)
+            _t = _c.get("data_type", "image")
+            _agg_infos.append(DataTypeInfo(DataType(_t), _n))
+        _agg = summarise_data_types(_agg_infos)
+
         det_response = DetectionResult(
             channel_suffixes=first_cond.get("channel_suffixes", []),
             n_channels=len(first_cond.get("channel_suffixes", [])),
@@ -330,6 +374,11 @@ async def scan_experiment(req: ScanRequest):
             suggested_markers=first_cond.get("suggested_markers", []),
             channel_wavelengths=wavelengths,
             channel_colors=channel_colors,
+            data_type=_agg.data_type.value,
+            n_frames_typical=_agg.n_frames_typical,
+            mixed_data_types=_agg.mixed,
+            acquisition_channel=_agg.channel_name,
+            objective=_agg.objective,
         )
 
     return ScanResponse(

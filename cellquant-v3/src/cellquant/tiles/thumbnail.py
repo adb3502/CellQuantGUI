@@ -70,7 +70,10 @@ def render_image(
 
     from cellquant.core.io.image_loader import load_image
 
-    img = load_image(image_path)
+    # A preview deliberately shows ONE representative frame of a
+    # recording, so it opts out of the time-lapse guard explicitly
+    # rather than being surprised by it.
+    img = load_image(image_path, allow_timelapse=True)
     img_uint8 = imagej_auto_contrast(img)
 
     # Apply false-color LUT if requested (skip for white/gray = standard grayscale)

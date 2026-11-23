@@ -40,6 +40,14 @@ class DetectionResult(BaseModel):
     suggested_markers: List[str] = []
     channel_wavelengths: Dict[str, float] = {}   # suffix -> nm
     channel_colors: Dict[str, str] = {}           # suffix -> hex color from wavelength
+    # What KIND of data this is. Without it the UI cannot route the user, and
+    # a 120-frame recording is indistinguishable from a single image until the
+    # numbers come out wrong. "image" | "timelapse" | "zstack".
+    data_type: str = "image"
+    n_frames_typical: int = 1
+    mixed_data_types: bool = False
+    acquisition_channel: Optional[str] = None
+    objective: Optional[str] = None
 
 
 class ScanResponse(BaseModel):

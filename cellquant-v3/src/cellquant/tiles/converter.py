@@ -28,7 +28,10 @@ def generate_tiles_for_image(
     """
     from cellquant.core.io.image_loader import load_image, normalize_image
 
-    img = load_image(image_path)
+    # A preview deliberately shows ONE representative frame of a
+    # recording, so it opts out of the time-lapse guard explicitly
+    # rather than being surprised by it.
+    img = load_image(image_path, allow_timelapse=True)
     img_norm = normalize_image(img)
     img_uint8 = (img_norm * 255).astype(np.uint8)
 
