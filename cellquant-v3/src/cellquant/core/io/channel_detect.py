@@ -55,8 +55,26 @@ def _strip_tiff_ext(name: str) -> str:
     return name
 
 
+# Some instruments append a per-image GUID directly onto the last token, with no
+# separator: "..._A04_s1_w1EF336313-23DE-4E60-A58D-A5B8D42294BE.tif". Left alone
+# this fuses the channel ("w1") into an unrecognisable token and splits the GUID
+# into junk tokens on its hyphens, so the channel is never detected.
+_TRAILING_GUID = re.compile(
+    r'[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$',
+    re.IGNORECASE,
+)
+
+
+def _strip_trailing_guid(stem: str) -> str:
+    """Remove a trailing 8-4-4-4-12 GUID, whether or not a separator precedes it."""
+    stripped = _TRAILING_GUID.sub('', stem)
+    # A separator may now dangle (".._w1-" or ".._w1_"); leave the rest intact.
+    return stripped.rstrip('_- ')
+
+
 def _tokenize(stem: str) -> List[str]:
     """Split filename stem by underscores, hyphens, or spaces, filtering empty tokens."""
+    stem = _strip_trailing_guid(stem)
     return [t.strip() for t in re.split(r'[_\- ]+', stem) if t.strip()]
 
 
@@ -92,6 +110,12 @@ def _is_channel_like(value: str) -> float:
     if re.match(r'^(w|c|ch)\d{2}$', v):
         return 0.85
 
+    # Site/position within a well (s1, s2, s12) — a coordinate, not a channel.
+    # Checked before the generic letter+digit rule below, which would otherwise
+    # score "s1" as 0.6 and let the site masquerade as the channel axis.
+    if re.match(r'^s\d{1,2}$', v):
+        return 0.05
+
     # Generic letter + single digit (less confident): D1, F2
     if re.match(r'^[a-z]\d$', v):
         return 0.6
@@ -115,6 +139,18 @@ def _is_channel_like(value: str) -> float:
     return 0.0
 
 
+# A per-image identifier: a long digit run, usually prefixed (XY1222807246,
+# P0001234). It varies across files exactly like a channel axis would, so the
+# frequency heuristics below cannot tell them apart. It is NOT hardcoded away:
+# the token is only demoted as a *channel*, and remains available for grouping
+# should an instrument give it meaning.
+_IMAGE_ID_RE = re.compile(r'^[a-z]{0,3}\d{5,}$', re.IGNORECASE)
+
+
+def _looks_like_image_id(value: str) -> bool:
+    return bool(_IMAGE_ID_RE.match(value.strip()))
+
+
 def _channel_score(values: Set[str], cardinality: int, freq: int,
                    total_files: int, pos: int, n_positions: int) -> float:
     """
@@ -123,8 +159,18 @@ def _channel_score(values: Set[str], cardinality: int, freq: int,
     """
     score = 0.0
 
-    # Must have at least 2 unique values to be a channel (need multiple channels)
+    # A single-channel experiment is legitimate: every file carries the same
+    # channel token (e.g. C0 throughout a reporter time-lapse). Disqualifying
+    # cardinality 1 outright made the real channel lose to a per-image id,
+    # which varies and so looked more "channel-like" to the frequency rules.
+    # Accept it only when the token itself is strongly channel-like, so that
+    # constant non-channel tokens (Z0, T000) still score badly.
     if cardinality < 2:
+        only = next(iter(values)) if values else ""
+        if _is_channel_like(only) >= 0.85:
+            # Present in every file, and looks like a channel: score it above
+            # any varying id token but below a genuine multi-channel axis.
+            return 12.0 + 2.0 * _is_channel_like(only)
         return -1.0
 
     # Must have at most ~10 channels (more than that is unlikely)
@@ -163,6 +209,11 @@ def _channel_score(values: Set[str], cardinality: int, freq: int,
     all_pure_digits = all(re.match(r'^\d+$', v) and _is_channel_like(v) < 0.5 for v in values)
     if all_pure_digits:
         score -= 8.0  # Likely coordinates (sx, sy values), not channels
+
+    # A position whose values are per-image identifiers is an image axis, not a
+    # channel axis. Without this, one image per id reads as "N channels, N sets".
+    if values and all(_looks_like_image_id(v) for v in values):
+        score -= 15.0
 
     return score
 
@@ -311,13 +362,36 @@ def detect_image_sets(tiff_files: List[Path]) -> ImageSetDetection:
         channel_pos = n_positions - 1
         channel_suffixes = sorted(position_stats[channel_pos]["values"])
 
+    # ─── Phase 4b: Recover orphans with the same scheme ───────────
+    # A file is excluded above purely for having a different token count, but a
+    # varying-length prefix is routine: "Ach_10mM_..." has one token fewer than
+    # "Ach_10_uM_..." while following the identical scheme. Dropping those lost
+    # real doses from the analysis with no warning. The channel sits at a fixed
+    # offset from the END, so re-admit any orphan whose token at that offset is
+    # one of the detected channels.
+    channel_offset_from_end = n_positions - channel_pos
+    recovered = []
+    still_orphans = []
+    channel_value_set = set(channel_suffixes)
+    for f in orphans:
+        tokens = _tokenize(_strip_tiff_ext(f.name))
+        if len(tokens) >= channel_offset_from_end:
+            idx = len(tokens) - channel_offset_from_end
+            if tokens[idx] in channel_value_set:
+                recovered.append((f, tokens, idx))
+                continue
+        still_orphans.append(f)
+    orphans = still_orphans
+
     # ─── Phase 5: Build image sets ────────────────────────────────
     image_sets: Dict[str, Dict[str, Path]] = {}
 
-    for f, tokens in main_group:
-        channel_value = tokens[channel_pos]
+    for f, tokens, pos_in_file in (
+        [(f, t, channel_pos) for f, t in main_group] + recovered
+    ):
+        channel_value = tokens[pos_in_file]
         # Base name = all tokens except the channel token
-        base_tokens = tokens[:channel_pos] + tokens[channel_pos + 1:]
+        base_tokens = tokens[:pos_in_file] + tokens[pos_in_file + 1:]
         base_name = "_".join(base_tokens)
 
         if base_name not in image_sets:
