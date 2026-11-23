@@ -32,10 +32,18 @@ _UNIT_END = r"(?![A-Za-z])"
 #
 # The lookbehind stops a match starting mid-number, so "T000"/"Z0" cannot
 # produce a dose.
+# Separator between the number and its unit. Real stems write the dose three
+# ways - "Ach 1 uM" (space), "epi1uM" (none) and "Ach_1_uM_XY..." (underscore,
+# the SlideBook export form). \s* misses the underscore, so 3 of 7 real doses
+# parsed as nothing at all. A SINGLE optional separator only: it must not span
+# tokens, or "plate_5_m" would read as 5 M.
+_SEP = r"[\s_]?"
+
 _DOSE_RE = re.compile(
-    r"(?<![0-9.])(\d+(?:\.\d+)?)\s*((?:[mM][mM]|[uUµ][mM]|[nN][mM]|[pP][mM]|M))" + _UNIT_END)
+    r"(?<![0-9.])(\d+(?:\.\d+)?)" + _SEP +
+    r"((?:[mM][mM]|[uUµ][mM]|[nN][mM]|[pP][mM]|M))" + _UNIT_END)
 _VOLUME_RE = re.compile(
-    r"(?<![0-9.])(\d+(?:\.\d+)?)\s*([uUµ][lL])" + _UNIT_END)
+    r"(?<![0-9.])(\d+(?:\.\d+)?)" + _SEP + r"([uUµ][lL])" + _UNIT_END)
 
 
 @dataclass

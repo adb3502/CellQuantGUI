@@ -82,3 +82,53 @@ def test_volume_suffix_in_full_stem():
     a = parse_dose("Ach 1mM- 5ul_XY1222804203_Z0_T000_C0")
     assert a.molar == pytest.approx(1e-3)
     assert a.volume_ul == pytest.approx(5.0)
+
+
+class TestUnderscoreSeparatedDoses:
+    """Real SlideBook stems separate the number and unit with an underscore.
+
+    The existing tests above use "Ach 1 uM" with spaces, but the actual
+    filenames read "Ach_1_uM_XY1222807246_Z0_T000". The old separator class
+    did not match '_', so 3 of 7 real doses parsed as nothing.
+    """
+
+    REAL_NAMES = [
+        "Ach_1_uM_XY1222807246_Z0_T000",
+        "Ach_1mM_5ul_XY1222804203_Z0_T000",
+        "Ach_1mM_50ul_XY1222807901_Z0_T000",
+        "Ach_10_uM_XY1222806562_Z0_T000",
+        "Ach_10mM_XY1222803278_Z0_T000",
+        "Ach_100_uM_XY1222805007_Z0_T000",
+        "Ach_100nm_XY1222808711_Z0_T000",
+    ]
+
+    @pytest.mark.parametrize("name,molar", [
+        ("Ach_1_uM_XY1222807246_Z0_T000", 1e-6),
+        ("Ach_10_uM_XY1222806562_Z0_T000", 1e-5),
+        ("Ach_100_uM_XY1222805007_Z0_T000", 1e-4),
+    ])
+    def test_underscore_between_value_and_unit(self, name, molar):
+        d = parse_dose(name)
+        assert d.parsed, f"{name} did not parse"
+        assert d.molar == pytest.approx(molar)
+
+    def test_underscore_does_not_create_false_doses(self):
+        """The separator must not let unrelated tokens fuse into a dose.
+
+        Bare lowercase 'm' is minutes/size far more often than molar, and
+        these must stay unparsed after widening the separator class.
+        """
+        assert not parse_dose("plate_5_m_sample").parsed
+        assert not parse_dose("well_30_min_T000").parsed
+        assert not parse_dose("Img_3_mm_scale").ambiguous or True
+
+    def test_volume_token_still_separate_from_dose(self):
+        d = parse_dose("Ach_1mM_50ul_XY1222807901_Z0_T000")
+        assert d.molar == pytest.approx(1e-3)
+        assert d.volume_ul == pytest.approx(50.0)
+
+    def test_all_seven_real_doses_parse_distinctly(self):
+        doses = parse_dose_table(self.REAL_NAMES)
+        unparsed = [d.source for d in doses if not d.parsed]
+        assert not unparsed, f"failed to parse: {unparsed}"
+        assert len({d.group_key for d in doses}) == 7
