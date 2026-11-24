@@ -164,20 +164,34 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     # Serve pre-built frontend (SPA — must be LAST, after all API routes)
-    static_dir = Path(__file__).parent.parent / "static"
-    if static_dir.exists() and any(static_dir.iterdir()):
-        from fastapi.responses import FileResponse
-        from fastapi import Request as _Request
-
-        # Mount static assets (JS/CSS/images) at /_app and other known prefixes
-        app.mount("/_app", StaticFiles(directory=str(static_dir / "_app")), name="assets")
-
-        # SPA catch-all: serve index.html for any unmatched path
-        @app.get("/{full_path:path}", include_in_schema=False)
-        async def spa_fallback(full_path: str, request: _Request):
-            index = static_dir / "index.html"
-            if index.exists():
-                return FileResponse(str(index))
-            return {"detail": "Frontend not built"}
+    mount_frontend(app, Path(__file__).parent.parent / "static")
 
     return app
+
+
+def mount_frontend(app: FastAPI, static_dir: Path) -> bool:
+    """Serve the built SvelteKit app, if there is one.
+
+    The build is not in git (the Docker build produces it), so a fresh
+    checkout's static/ holds only .gitkeep. Mounting static/_app then
+    crashed create_app(); an API-only backend must still start.
+    Returns whether the frontend was mounted.
+    """
+    if not (static_dir / "_app").is_dir():
+        return False
+
+    from fastapi import Request as _Request
+    from fastapi.responses import FileResponse
+
+    # Mount static assets (JS/CSS/images) at /_app
+    app.mount("/_app", StaticFiles(directory=str(static_dir / "_app")), name="assets")
+
+    # SPA catch-all: serve index.html for any unmatched path
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str, request: _Request):
+        index = static_dir / "index.html"
+        if index.exists():
+            return FileResponse(str(index))
+        return {"detail": "Frontend not built"}
+
+    return True
