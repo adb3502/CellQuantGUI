@@ -174,13 +174,16 @@ class TaskQueue:
             try:
                 with LogCapture(task, self._notify):
                     result = fn(task, *args, **kwargs)
-                task.status = "complete"
                 task.result = result
                 task.progress = 100.0
+                task.status = "complete"
             except Exception as e:
-                task.status = "error"
+                # Attach the reason BEFORE flipping the status. A poller that
+                # sees status == "error" must already be able to read why;
+                # otherwise it renders a failure with a blank message.
                 task.error = traceback.format_exc()
                 task.message = str(e)
+                task.status = "error"
             finally:
                 task.completed_at = time.time()
                 self._notify(session_id, task)

@@ -18,6 +18,21 @@
 		PanelLeftOpen
 	} from 'lucide-svelte';
 	import { isAdmin } from '$stores/auth';
+	import { healthCheck } from '$lib/api/client';
+	import { onMount } from 'svelte';
+
+	// Read the version from the backend rather than hardcoding it here: a
+	// literal in this file silently drifted from pyproject.toml and showed a
+	// stale version after a deploy. Falls back if the call fails.
+	let version = $state('3.1.0');
+	onMount(async () => {
+		try {
+			const h = await healthCheck();
+			if (h?.version) version = h.version;
+		} catch {
+			// keep fallback
+		}
+	});
 
 	const navItems = [
 		{ href: '/experiment', label: 'Experiment', icon: FlaskConical },
@@ -100,7 +115,7 @@
 
 	{#if !collapsed}
 		<div class="sidebar-footer font-mono">
-			v3.0.0
+			v{version}
 		</div>
 	{/if}
 </nav>

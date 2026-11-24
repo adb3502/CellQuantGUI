@@ -38,6 +38,9 @@ class SegmentationStatusResponse(BaseModel):
     message: str
     elapsed_seconds: float = 0.0
     result: Optional[dict] = None
+    # The full traceback. Without it a client that missed the websocket
+    # event has no way to learn why the task failed.
+    error: Optional[str] = None
 
 
 class TaskResponse(BaseModel):
