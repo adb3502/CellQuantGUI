@@ -184,43 +184,120 @@ async def get_video_info(session_id: str, condition: str, base_name: str):
     }
 
 
-@router.get("/frame/{session_id}/{condition}/{base_name}/{frame}")
-async def get_video_frame(
-    session_id: str, condition: str, base_name: str, frame: int,
-    overlay: bool = True,
-):
-    """One frame, at contrast fixed for the whole recording, ROIs optional.
+_HEAT_MODES = ("none", "cell", "pixel")
 
-    The ROIs are static, so stepping through frames shows which cells change.
-    """
+
+def _require_traces(session, condition: str, base_name: str):
+    df = session.traces_df
+    if df is None or df.empty:
+        raise HTTPException(404, "No traces yet - run video analysis to colour cells by activity")
+    sub = df[(df["Condition"] == condition) & (df["ImageSet"] == base_name)]
+    if sub.empty:
+        raise HTTPException(404, f"No traces for {condition}/{base_name}")
+    return df
+
+
+def _require_masks(session, condition: str, base_name: str):
+    masks = _load_video_masks(session, condition, base_name)
+    if masks is None:
+        raise HTTPException(404, "No ROIs yet - run video analysis first")
+    return masks
+
+
+def _render_frame_png(session, condition: str, base_name: str, frame: int,
+                      overlay: bool, heat: str) -> bytes:
+    """Synchronous render. 40-110 ms of numpy/scipy/PNG work per frame, so it
+    must not run on the event loop: playback preloads every frame, and doing
+    that inline would stall every other request - logins, status polls -
+    for seconds."""
     import io as _io
 
     import numpy as np
-    from fastapi.responses import StreamingResponse
     from PIL import Image
 
-    from cellquant.core.io.timelapse_view import display_limits, read_frame, to_uint8
-    from cellquant.core.segmentation.cellpose_engine import _create_outline_overlay
+    from cellquant.core.io import timelapse_view as tv
 
-    session = get_session(session_id)
     path = _video_path(session, condition, base_name)
     try:
-        raw = read_frame(path, frame)
+        raw = tv.read_frame(path, frame)
     except IndexError as exc:
         raise HTTPException(400, str(exc))
 
-    lo, hi = display_limits(path)
-    img = to_uint8(raw, lo, hi)
+    lo, hi = tv.display_limits(path)
+    rgb = tv.to_rgb(tv.to_uint8(raw, lo, hi))
+
+    if heat == "cell":
+        df = _require_traces(session, condition, base_name)
+        masks = _require_masks(session, condition, base_name)
+        lut = tv.cell_values_for_frame(df, condition, base_name, frame, int(masks.max()))
+        vlo, vhi = tv.cell_activity_limits(df, condition, base_name)
+        rgb = tv.blend_colour(rgb, lut[np.asarray(masks, dtype=np.int64)], vlo, vhi)
+    elif heat == "pixel":
+        masks = _require_masks(session, condition, base_name)
+        n0 = tv.baseline_frame_count(tv.frame_count(path), session.video_params)
+        values = tv.pixel_dff_frame(path, frame, masks, n0)
+        vlo, vhi = tv.pixel_activity_limits(path, masks, n0)
+        rgb = tv.blend_colour(rgb, values, vlo, vhi)
 
     if overlay:
         masks = _load_video_masks(session, condition, base_name)
         if masks is not None:
-            img = _create_outline_overlay(img, masks)
+            # Red outlines vanish against red (high-response) cells.
+            colour = (255, 255, 255) if heat != "none" else (255, 40, 40)
+            rgb = tv.draw_outlines(rgb, masks, colour)
 
     buf = _io.BytesIO()
-    Image.fromarray(np.asarray(img, dtype=np.uint8)).save(buf, format="PNG")
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="image/png")
+    Image.fromarray(rgb).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@router.get("/frame/{session_id}/{condition}/{base_name}/{frame}")
+async def get_video_frame(
+    session_id: str, condition: str, base_name: str, frame: int,
+    overlay: bool = True, heat: str = "none",
+):
+    """One frame at contrast fixed for the whole recording.
+
+    overlay: draw ROI outlines.
+    heat:    "cell"  - fill each ROI with its dF/F0 at this frame (the exact
+                       values in the traces table);
+             "pixel" - colour each pixel inside the ROIs by its own dF/F0;
+             "none"  - plain frame.
+    The colour scale is fixed per recording (see /activity-range), so a
+    colour means the same dF/F0 in every frame.
+    """
+    from fastapi.responses import Response
+    from starlette.concurrency import run_in_threadpool
+
+    if heat not in _HEAT_MODES:
+        raise HTTPException(400, f"heat must be one of {', '.join(_HEAT_MODES)}")
+    session = get_session(session_id)
+    png = await run_in_threadpool(
+        _render_frame_png, session, condition, base_name, frame, overlay, heat)
+    # Playback preloads every frame. The URL carries a per-run stamp, so a
+    # cached frame is never stale across runs.
+    return Response(png, media_type="image/png",
+                    headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/activity-range/{session_id}/{condition}/{base_name}")
+async def get_activity_range(session_id: str, condition: str, base_name: str,
+                             mode: str = "cell"):
+    """The fixed colour scale of the activity overlay, for the colour bar."""
+    from cellquant.core.io import timelapse_view as tv
+
+    session = get_session(session_id)
+    if mode == "cell":
+        df = _require_traces(session, condition, base_name)
+        lo, hi = tv.cell_activity_limits(df, condition, base_name)
+    elif mode == "pixel":
+        path = _video_path(session, condition, base_name)
+        masks = _require_masks(session, condition, base_name)
+        n0 = tv.baseline_frame_count(tv.frame_count(path), session.video_params)
+        lo, hi = tv.pixel_activity_limits(path, masks, n0)
+    else:
+        raise HTTPException(400, "mode must be 'cell' or 'pixel'")
+    return {"lo": lo, "hi": hi, "mode": mode}
 
 
 @router.get("/trace-matrix/{session_id}/{condition}/{base_name}")

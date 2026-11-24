@@ -918,11 +918,19 @@ export function videoExportUrl(sessionId: string, kind: 'summary' | 'traces'): s
 	return `${BASE}/video/export/${sessionId}?kind=${kind}`;
 }
 
+export type VideoHeat = 'none' | 'cell' | 'pixel';
+
 export function videoFrameUrl(
 	sessionId: string, condition: string, baseName: string,
-	frame: number, overlay = true, bust = ''
+	frame: number, overlay = true, bust = '', heat: VideoHeat = 'none'
 ): string {
-	return `${BASE}/video/frame/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${frame}?overlay=${overlay}&v=${bust}`;
+	return `${BASE}/video/frame/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${frame}?overlay=${overlay}&heat=${heat}&v=${bust}`;
+}
+
+export async function getActivityRange(
+	sessionId: string, condition: string, baseName: string, mode: 'cell' | 'pixel'
+): Promise<{ lo: number; hi: number; mode: string }> {
+	return request(`/video/activity-range/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}?mode=${mode}`);
 }
 
 // ---- SA-beta-gal analytics ----

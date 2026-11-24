@@ -49,6 +49,9 @@ class Session:
     # run never overwrites a segmentation result for the same image set.
     video_masks: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
     video_projections: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
+    # Parameters of the last video run. The pixel activity overlay needs the
+    # run's own baseline window to compute dF/F0 the same way the traces did.
+    video_params: Dict[str, any] = field(default_factory=dict)
 
     # SA-beta-gal analytics
     sabetagal_df: Optional[pd.DataFrame] = None

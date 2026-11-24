@@ -1067,6 +1067,7 @@ def run_video_task(task, queue, session, video_params: dict) -> dict:
     )
     mode = video_params.get("mode", "static_roi")
     only_condition = video_params.get("condition")
+    session.video_params = dict(video_params)
 
     targets = []
     for cond_name, cond in session.conditions.items():

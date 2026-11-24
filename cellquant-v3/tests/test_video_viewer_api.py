@@ -24,10 +24,11 @@ def _run(coro):
 
 
 async def _body(resp):
-    chunks = []
-    async for c in resp.body_iterator:
-        chunks.append(c if isinstance(c, bytes) else c.encode())
-    return b"".join(chunks)
+    # Frames come back as a plain Response; overlays and CSVs stream.
+    if not hasattr(resp, "body_iterator"):
+        return resp.body
+    return b"".join([c if isinstance(c, bytes) else c.encode()
+                     async for c in resp.body_iterator])
 
 
 @pytest.fixture

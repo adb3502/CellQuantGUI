@@ -1,11 +1,11 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
 	import { Play, Pause, ChevronLeft, ChevronRight, Film, Activity, FlaskConical } from 'lucide-svelte';
 	import { ProgressSocket } from '$lib/api/websocket';
 	import {
 		runVideo, getVideoSummary, parseDoses, getSegmentationStatus,
-		getVideoTraceMatrix, getVideoInfo, videoOverlayUrl, videoFrameUrl,
-		type VideoTraceMatrix
+		getVideoTraceMatrix, getVideoInfo, videoOverlayUrl, videoFrameUrl, getActivityRange,
+		type VideoTraceMatrix, type VideoHeat
 	} from '$lib/api/client';
 	import { sessionId } from '$lib/stores/session';
 	import { conditions } from '$lib/stores/experiment';
@@ -50,15 +50,33 @@
 	let videoIndex = $state(0);
 	let current = $derived<VideoRef | null>(filtered[videoIndex] ?? null);
 
+	// The video is the main view; the projection with its ROIs is secondary.
 	let viewMode = $state<'rois' | 'frames'>('frames');
 	let overlayStyle = $state<'outline' | 'filled'>('outline');
 	let showRoisOnFrames = $state(true);
+	// Pseudocolour on the video: each cell (or pixel) tinted by dF/F0.
+	let heat = $state<VideoHeat>('none');
+	let heatRange = $state<{ lo: number; hi: number } | null>(null);
 
 	let nFrames = $state(0);
 	let hasRois = $state(false);
 	let nCells = $state(0);
 	let frame = $state(0);
 	let playing = $state(false);
+
+	// Playback speed. 1x is real time when the frame interval is known,
+	// otherwise 10 frames per second.
+	const SPEEDS = [0.25, 0.5, 1, 2, 4];
+	let speed = $state(1);
+	let baseFps = $derived(intervalS && intervalS > 0 ? Math.min(30, 1 / intervalS) : 10);
+	let fps = $derived(Math.min(60, baseFps * speed));
+
+	// Every frame is fetched once into memory so playback never waits on the
+	// server. Keyed by frame index; a new video or overlay setting refills it.
+	let frameCache = $state<Record<number, string>>({});
+	let buffered = $state(0);
+	let frameError = $state('');
+	let loadToken = 0;
 
 	let matrix = $state<VideoTraceMatrix | null>(null);
 	let chartEl: HTMLDivElement | undefined = $state();
@@ -73,7 +91,8 @@
 		if (idx >= 0) {
 			activeCondition = f.condition;
 			videoIndex = idx;
-			viewMode = 'rois';
+			viewMode = 'frames';
+			heat = 'cell';
 		}
 		videoFocus.set(null);
 	});
@@ -92,10 +111,94 @@
 				? videoOverlayUrl($sessionId, current.condition, current.baseName, overlayStyle, runStamp)
 				: null;
 		}
+		return frameCache[frame] ?? frameUrl(frame);
+	});
+
+	function frameUrl(f: number): string {
+		if (!current || !$sessionId) return '';
 		return videoFrameUrl(
-			$sessionId, current.condition, current.baseName, frame,
-			showRoisOnFrames && hasRois, runStamp
+			$sessionId, current.condition, current.baseName, f,
+			showRoisOnFrames && hasRois, runStamp, effectiveHeat
 		);
+	}
+
+	// A heat mode needs ROIs (and, per cell, traces); fall back to plain.
+	let effectiveHeat = $derived<VideoHeat>(
+		!hasRois ? 'none' : heat === 'cell' && !matrix ? 'none' : heat
+	);
+
+	function clearFrameCache() {
+		for (const u of Object.values(frameCache)) URL.revokeObjectURL(u);
+		frameCache = {};
+		buffered = 0;
+	}
+
+	// Refill the frame cache whenever what a frame looks like changes.
+	$effect(() => {
+		const v = current;
+		const sid = $sessionId;
+		const n = nFrames;
+		void showRoisOnFrames; void hasRois; void effectiveHeat; void runStamp;
+		if (!v || !sid || n < 1 || viewMode !== 'frames') return;
+		// untrack: preloading reads `frame` and writes `frameCache`; tracked,
+		// either would re-run this effect and restart the load endlessly.
+		untrack(() => preloadFrames(n));
+	});
+
+	let cacheKey = '';
+
+	async function preloadFrames(n: number) {
+		const key = `${current?.condition}|${current?.baseName}|${showRoisOnFrames && hasRois}|${effectiveHeat}|${runStamp}|${n}`;
+		if (key === cacheKey && !frameError && buffered > 0) return;
+		cacheKey = key;
+		const token = ++loadToken;
+		clearFrameCache();
+		frameError = '';
+		// Start from the frame on screen so it and its neighbours come first.
+		const start = frame;
+		const order = Array.from({ length: n }, (_, i) => (start + i) % n);
+		const urls = order.map((f) => [f, frameUrl(f)] as const);
+		let next = 0;
+		async function worker() {
+			while (next < urls.length) {
+				const [f, url] = urls[next++];
+				try {
+					const res = await fetch(url);
+					if (!res.ok) throw new Error(await res.text());
+					const blobUrl = URL.createObjectURL(await res.blob());
+					if (token !== loadToken) { URL.revokeObjectURL(blobUrl); return; }
+					frameCache[f] = blobUrl;
+					buffered += 1;
+				} catch (e: any) {
+					if (token === loadToken) frameError = `Frame ${f} failed to load: ${e?.message ?? e}`;
+					return;
+				}
+			}
+		}
+		await Promise.all([worker(), worker(), worker(), worker()]);
+	}
+
+	// The colour bar's numbers: one fixed scale for the whole recording.
+	$effect(() => {
+		const v = current;
+		const sid = $sessionId;
+		const h = effectiveHeat;
+		heatRange = null;
+		if (!v || !sid || h === 'none') return;
+		getActivityRange(sid, v.condition, v.baseName, h)
+			.then((r) => { if (effectiveHeat === h) heatRange = { lo: r.lo, hi: r.hi }; })
+			.catch(() => { heatRange = null; });
+	});
+
+	// Advance at the chosen speed, but never past a frame that has not
+	// arrived yet: playback holds instead of stuttering through blanks.
+	$effect(() => {
+		if (!playing || viewMode !== 'frames' || nFrames < 2) return;
+		const id = setInterval(() => {
+			const nxt = frame + 1 >= nFrames ? 0 : frame + 1;
+			if (frameCache[nxt]) frame = nxt;
+		}, 1000 / fps);
+		return () => clearInterval(id);
 	});
 
 	// Load frame count, ROI status and traces whenever the video changes.
@@ -129,21 +232,42 @@
 	}
 
 	// ── Playback ───────────────────────────────────────────────
-	// Advance only after the previous frame has loaded, so a slow request
-	// never queues up a backlog of frames.
-	function onFrameLoaded() {
-		if (!playing || viewMode !== 'frames') return;
-		setTimeout(() => {
-			if (!playing) return;
-			frame = frame + 1 >= nFrames ? 0 : frame + 1;
-		}, 60);
-	}
-
 	function togglePlay() {
 		if (viewMode !== 'frames') viewMode = 'frames';
 		playing = !playing;
-		if (playing) frame = frame + 1 >= nFrames ? 0 : frame + 1;
 	}
+
+	function step(delta: number) {
+		playing = false;
+		if (nFrames > 0) frame = (frame + delta + nFrames) % nFrames;
+	}
+
+	function onKey(e: KeyboardEvent) {
+		const t = e.target as HTMLElement | null;
+		if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+		if (viewMode !== 'frames' || nFrames < 2) return;
+		if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+		else if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+		else if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+	}
+
+	// ── Colour map (same as the backend overlay) ───────────────
+	// Turbo, started at 0.1: its bottom end is near-black and would make
+	// "no change" look like "no cell". Must match timelapse_view.TURBO_START.
+	const TURBO_START = 0.1;
+	function turbo(x: number): [number, number, number] {
+		x = Math.min(1, Math.max(0, x));
+		const r = 0.13572138 + x * (4.6153926 + x * (-42.66032258 + x * (132.13108234 + x * (-152.94239396 + x * 59.28637943))));
+		const g = 0.09140261 + x * (2.19418839 + x * (4.84296658 + x * (-14.18503333 + x * (4.27729857 + x * 2.82956604))));
+		const b = 0.1066733 + x * (12.64194608 + x * (-60.58204836 + x * (110.36276771 + x * (-89.90310912 + x * 27.34824973))));
+		const c = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255);
+		return [c(r), c(g), c(b)];
+	}
+	const turboScale: [number, string][] = Array.from({ length: 11 }, (_, i) => {
+		const [r, g, b] = turbo(TURBO_START + (1 - TURBO_START) * (i / 10));
+		return [i / 10, `rgb(${r},${g},${b})`];
+	});
+	const turboGradient = `linear-gradient(to right, ${turboScale.map(([p, c]) => `${c} ${p * 100}%`).join(', ')})`;
 
 	function prevVideo() {
 		if (videoIndex > 0) videoIndex -= 1;
@@ -276,7 +400,7 @@
 
 			if (chartView === 'heatmap') {
 				await plotly.react(chartEl, [{
-					x: xs, y: rows, z, type: 'heatmap', colorscale: 'Viridis', zmin, zmax,
+					x: xs, y: rows, z, type: 'heatmap', colorscale: turboScale, zmin, zmax,
 					text: hover, hovertemplate: '%{text}<br>' + xTitle + ' %{x}<br>ΔF/F₀ %{z:.3f}<extra></extra>',
 					colorbar: { title: 'ΔF/F₀', thickness: 12 }
 				}], {
@@ -287,7 +411,7 @@
 				}, config);
 			} else {
 				await plotly.react(chartEl, [{
-					x: xs, y: rows, z, type: 'surface', colorscale: 'Viridis', cmin: zmin, cmax: zmax,
+					x: xs, y: rows, z, type: 'surface', colorscale: turboScale, cmin: zmin, cmax: zmax,
 					text: hover, hovertemplate: '%{text}<br>' + xTitle + ' %{x}<br>ΔF/F₀ %{z:.3f}<extra></extra>',
 					contours: { z: { show: true, usecolormap: true, project: { z: true } } },
 					colorbar: { title: 'ΔF/F₀', thickness: 12 }
@@ -365,7 +489,11 @@
 			wsMessage = 'Video analysis complete';
 			errorText = '';
 			runStamp = String(Date.now());
-			viewMode = 'rois';
+			// Show the result as a video, cells coloured by response, playing.
+			viewMode = 'frames';
+			heat = $videoMode === 'static_roi' ? 'cell' : 'none';
+			frame = 0;
+			playing = true;
 			loadSummary();
 		} else {
 			errorText = message || 'Video analysis failed';
@@ -451,6 +579,8 @@
 	onMount(loadSummary);
 	onDestroy(() => {
 		playing = false;
+		loadToken += 1;
+		clearFrameCache();
 		stopPoll();
 		disconnectWebSocket();
 		if (plotly && chartEl) plotly.purge(chartEl);
@@ -473,6 +603,8 @@
 	let responders = $derived(currentSummary.filter((r) => (r.n_events ?? 0) > 0).length);
 	let timeLabel = $derived(intervalS ? `${(frame * intervalS).toFixed(2)} s` : '');
 </script>
+
+<svelte:window onkeydown={onKey} />
 
 <div class="page-video">
 	{#if $conditions.length === 0}
@@ -613,12 +745,12 @@
 						{/if}
 						<span class="style-toggle">
 							<button class="style-btn font-ui" class:active={viewMode === 'frames'} onclick={() => (viewMode = 'frames')}>
-								<Film size={12} /> Frames
+								<Film size={12} /> Video
 							</button>
 							<button class="style-btn font-ui" class:active={viewMode === 'rois'} disabled={!hasRois}
-								title={hasRois ? 'Projection with ROIs' : 'Run video analysis to segment cells'}
+								title={hasRois ? 'The projection the cells were segmented on' : 'Run video analysis to segment cells'}
 								onclick={() => { viewMode = 'rois'; playing = false; }}>
-								ROIs
+								ROIs (projection)
 							</button>
 						</span>
 						{#if viewMode === 'rois'}
@@ -628,15 +760,29 @@
 								<button class="style-btn font-ui" class:active={overlayStyle === 'outline'}
 									onclick={() => (overlayStyle = 'outline')}>Outline</button>
 							</span>
-						{:else if hasRois}
+						{/if}
+					</h3>
+
+					{#if viewMode === 'frames' && hasRois}
+						<div class="overlay-row font-ui">
+							<span class="overlay-label">Colour by ΔF/F₀</span>
+							<span class="style-toggle">
+								<button class="style-btn font-ui" class:active={heat === 'none'} onclick={() => (heat = 'none')}>Off</button>
+								<button class="style-btn font-ui" class:active={heat === 'cell'} disabled={!matrix}
+									title="Each cell filled with its measured ΔF/F₀ at this frame - the numbers in the table"
+									onclick={() => (heat = 'cell')}>Per cell</button>
+								<button class="style-btn font-ui" class:active={heat === 'pixel'}
+									title="Each pixel inside the cells coloured by its own ΔF/F₀ - shows where in a cell the signal rises"
+									onclick={() => (heat = 'pixel')}>Per pixel</button>
+							</span>
 							<span class="style-toggle">
 								<button class="style-btn font-ui" class:active={showRoisOnFrames}
 									onclick={() => (showRoisOnFrames = !showRoisOnFrames)}>
-									{showRoisOnFrames ? 'ROIs on' : 'ROIs off'}
+									Outlines {showRoisOnFrames ? 'on' : 'off'}
 								</button>
 							</span>
-						{/if}
-					</h3>
+						</div>
+					{/if}
 
 					{#if conditionNames.length > 1}
 						<div class="preview-tabs">
@@ -651,12 +797,22 @@
 
 					<div class="preview-frame">
 						{#if imgSrc}
-							<img src={imgSrc} alt="{current?.condition}/{current?.baseName}" class="preview-img"
-								onload={onFrameLoaded} />
+							<img src={imgSrc} alt="{current?.condition}/{current?.baseName}" class="preview-img" />
 						{:else if viewMode === 'rois'}
 							<p class="muted font-ui">No ROIs yet. Run video analysis to segment this recording.</p>
 						{/if}
 					</div>
+
+					{#if viewMode === 'frames' && effectiveHeat !== 'none'}
+						<div class="colourbar font-mono">
+							<span>{heatRange ? heatRange.lo.toFixed(2) : '…'}</span>
+							<div class="colourbar-ramp" style="background: {turboGradient}"></div>
+							<span>{heatRange ? heatRange.hi.toFixed(2) : '…'}</span>
+							<span class="colourbar-label font-ui">
+								ΔF/F₀ {effectiveHeat === 'cell' ? 'per cell' : 'per pixel'} · same scale for every frame
+							</span>
+						</div>
+					{/if}
 
 					{#if viewMode === 'rois' && hasRois}
 						<p class="caption font-ui">
@@ -666,15 +822,43 @@
 
 					{#if viewMode === 'frames' && nFrames > 1}
 						<div class="scrubber">
-							<button class="icon-btn" onclick={togglePlay} title={playing ? 'Pause' : 'Play'}>
+							<button class="icon-btn" onclick={() => step(-1)} title="Previous frame (←)">
+								<ChevronLeft size={16} />
+							</button>
+							<button class="icon-btn" onclick={togglePlay} title={playing ? 'Pause (space)' : 'Play (space)'}>
 								{#if playing}<Pause size={16} />{:else}<Play size={16} />{/if}
 							</button>
-							<input type="range" class="field-range" min="0" max={nFrames - 1} step="1"
-								bind:value={frame} oninput={() => (playing = false)} />
+							<button class="icon-btn" onclick={() => step(1)} title="Next frame (→)">
+								<ChevronRight size={16} />
+							</button>
+							<div class="scrub-track">
+								<div class="buffer-bar" style="width: {nFrames ? (buffered / nFrames) * 100 : 0}%"></div>
+								<input type="range" class="field-range" min="0" max={nFrames - 1} step="1"
+									bind:value={frame} oninput={() => (playing = false)} />
+							</div>
 							<span class="font-mono frame-label">
 								{frame + 1}/{nFrames}{timeLabel ? ` · ${timeLabel}` : ''}
 							</span>
 						</div>
+						<div class="speed-row font-ui">
+							<span class="overlay-label">Speed</span>
+							<span class="style-toggle">
+								{#each SPEEDS as sp}
+									<button class="style-btn font-mono" class:active={speed === sp} onclick={() => (speed = sp)}>
+										{sp}×
+									</button>
+								{/each}
+							</span>
+							<span class="font-mono muted speed-fps">
+								{fps.toFixed(fps < 10 ? 1 : 0)} fps{intervalS ? '' : ' (set a frame interval for real time)'}
+							</span>
+							{#if buffered < nFrames}
+								<span class="font-mono muted">loading {buffered}/{nFrames}</span>
+							{/if}
+						</div>
+						{#if frameError}
+							<p class="field-hint warn font-ui">{frameError}</p>
+						{/if}
 					{/if}
 
 					<div class="preview-nav">
@@ -1222,7 +1406,61 @@
 	.scrubber {
 		display: flex;
 		align-items: center;
+		gap: 6px;
+	}
+	.scrub-track {
+		position: relative;
+		flex: 1;
+		display: flex;
+		align-items: center;
+	}
+	.scrub-track .field-range {
+		width: 100%;
+		position: relative;
+	}
+	/* How many frames are in memory, drawn under the slider like a video
+	   player's buffer bar. */
+	.buffer-bar {
+		position: absolute;
+		left: 0;
+		top: 50%;
+		height: 4px;
+		transform: translateY(-50%);
+		background: var(--accent-soft);
+		border-radius: 2px;
+		pointer-events: none;
+		transition: width 0.2s ease;
+	}
+	.speed-row,
+	.overlay-row {
+		display: flex;
+		align-items: center;
 		gap: 10px;
+		flex-wrap: wrap;
+		font-size: 12px;
+	}
+	.overlay-label {
+		color: var(--text-muted);
+		font-size: 12px;
+	}
+	.speed-fps {
+		font-size: 11px;
+	}
+	.colourbar {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 11px;
+		color: var(--text-muted);
+	}
+	.colourbar-ramp {
+		flex: 0 0 200px;
+		height: 10px;
+		border-radius: 2px;
+		border: 1px solid var(--border);
+	}
+	.colourbar-label {
+		margin-left: 6px;
 	}
 	.frame-label {
 		font-size: 12px;
