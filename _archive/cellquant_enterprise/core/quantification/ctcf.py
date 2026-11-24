@@ -34,10 +34,16 @@ class QuantificationResult:
     nuclear_signal: Optional[np.ndarray] = None
     is_mitochondrial: bool = False
 
+    @property
+    def mean_corrected_fluorescence(self) -> np.ndarray:
+        """CTCF / Area — represents fluorescence concentration rather than total content."""
+        return np.where(self.areas > 0, self.ctcf / self.areas, 0.0)
+
     def to_dict(self) -> Dict[str, np.ndarray]:
         """Convert to dictionary for DataFrame creation."""
         return {
             f'{self.marker_name}_CTCF': self.ctcf,
+            f'{self.marker_name}_MCF': self.mean_corrected_fluorescence,
             f'{self.marker_name}_IntegratedDensity': self.integrated_densities,
             f'{self.marker_name}_MeanIntensity': self.mean_intensities,
             f'{self.marker_name}_Background': np.full_like(self.ctcf, self.background),
@@ -264,20 +270,103 @@ def quantify_multiple_markers(
         return {name: quantify_single(name) for name in marker_images.keys()}
 
 
+def compute_qc_flags(
+    marker_image: np.ndarray,
+    masks: np.ndarray,
+    labels: np.ndarray,
+    areas: np.ndarray,
+    ctcf: np.ndarray,
+    bit_depth: int = 16,
+) -> 'pd.DataFrame':
+    """
+    Compute per-cell quality control flags for downstream filtering.
+
+    Flags produced:
+      - is_saturated: any pixel within the cell mask equals the detector
+        maximum (2^bit_depth - 1). Saturated cells have compressed CTCF
+        and must be excluded.
+      - is_outlier_area: area falls outside [Q1 - 1.5·IQR, Q3 + 1.5·IQR].
+        Indicates under- or over-segmentation.
+      - is_outlier_intensity: |modified Z-score| > 3.5 using MAD.
+        MAD has a 50% breakdown point, robust to the right-skewed
+        distributions typical of fluorescence data.
+
+    Args:
+        marker_image: Raw 2D image used for intensity measurement
+        masks: Integer label mask
+        labels: 1-D array of cell IDs matching areas / ctcf arrays
+        areas: Per-cell area in pixels
+        ctcf: Per-cell CTCF values
+        bit_depth: Detector bit depth (16 for most sCMOS/CCD, 8 for 8-bit)
+
+    Returns:
+        DataFrame with columns [is_saturated, is_outlier_area, is_outlier_intensity]
+        indexed 0..N-1 matching the labels array.
+    """
+    import pandas as pd
+
+    sat_threshold = 2 ** bit_depth - 1
+    n = len(labels)
+
+    # Saturation: any pixel in cell at detector maximum
+    is_saturated = np.zeros(n, dtype=bool)
+    for i, cell_id in enumerate(labels):
+        cell_pixels = marker_image[masks == cell_id]
+        if len(cell_pixels) > 0 and cell_pixels.max() >= sat_threshold:
+            is_saturated[i] = True
+
+    # Area outlier: Tukey IQR fence
+    if n >= 4:
+        q1, q3 = np.percentile(areas, [25, 75])
+        iqr = q3 - q1
+        is_outlier_area = (areas < q1 - 1.5 * iqr) | (areas > q3 + 1.5 * iqr)
+    else:
+        is_outlier_area = np.zeros(n, dtype=bool)
+
+    # Intensity outlier: MAD-based modified Z-score (Iglewicz & Hoaglin, 3.5)
+    if n >= 4:
+        median_ctcf = np.median(ctcf)
+        mad = np.median(np.abs(ctcf - median_ctcf))
+        if mad > 0:
+            modified_z = 0.6745 * (ctcf - median_ctcf) / mad
+            is_outlier_intensity = np.abs(modified_z) > 3.5
+        else:
+            is_outlier_intensity = np.zeros(n, dtype=bool)
+    else:
+        is_outlier_intensity = np.zeros(n, dtype=bool)
+
+    return pd.DataFrame({
+        'is_saturated': is_saturated,
+        'is_outlier_area': is_outlier_area,
+        'is_outlier_intensity': is_outlier_intensity,
+    })
+
+
 def results_to_dataframe(
     results: Dict[str, QuantificationResult],
     condition: str = "",
     image_set: str = "",
-    segmentation_type: str = "cellular"
+    segmentation_type: str = "cellular",
+    marker_images: Optional[Dict[str, np.ndarray]] = None,
+    masks: Optional[np.ndarray] = None,
+    bit_depth: int = 16,
 ) -> 'pd.DataFrame':
     """
     Convert quantification results to a pandas DataFrame.
+
+    When marker_images and masks are supplied, per-cell QC flags are appended:
+      - is_saturated: any pixel at detector maximum (unreliable CTCF)
+      - is_outlier_area: Tukey IQR outlier on cell area
+      - is_outlier_intensity: MAD-based Z-score outlier on CTCF (|Z| > 3.5)
 
     Args:
         results: Dict mapping marker name -> QuantificationResult
         condition: Condition name for the Condition column
         image_set: Image set name for the ImageSet column
         segmentation_type: Type of segmentation for SegmentationType column
+        marker_images: Optional dict of raw marker images for saturation check
+        masks: Optional label mask array for saturation check
+        bit_depth: Detector bit depth for saturation threshold
 
     Returns:
         DataFrame with one row per cell, all markers as columns
@@ -287,14 +376,12 @@ def results_to_dataframe(
     if not results:
         return pd.DataFrame()
 
-    # Get cell IDs from first result
     first_result = next(iter(results.values()))
     n_cells = first_result.n_cells
 
     if n_cells == 0:
         return pd.DataFrame()
 
-    # Build base columns
     data = {
         'Condition': [condition] * n_cells,
         'SegmentationType': [segmentation_type] * n_cells,
@@ -303,8 +390,24 @@ def results_to_dataframe(
         'Area': first_result.areas,
     }
 
-    # Add marker columns
     for result in results.values():
         data.update(result.to_dict())
 
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+
+    # Append QC flags when images are available
+    if marker_images is not None and masks is not None and n_cells > 0:
+        # Use the first marker image for saturation and area checks
+        ref_image = next(iter(marker_images.values()))
+        ref_result = next(iter(results.values()))
+        qc = compute_qc_flags(
+            marker_image=ref_image,
+            masks=masks,
+            labels=ref_result.cell_ids,
+            areas=ref_result.areas,
+            ctcf=ref_result.ctcf,
+            bit_depth=bit_depth,
+        )
+        df = pd.concat([df.reset_index(drop=True), qc.reset_index(drop=True)], axis=1)
+
+    return df

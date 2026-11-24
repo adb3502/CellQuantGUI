@@ -11,6 +11,8 @@ from cellquant_enterprise.core.segmentation.mask_utils import (
     split_cell,
     clean_small_objects,
     fill_holes,
+    remove_border_objects,
+    apply_morphological_filters,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "split_cell",
     "clean_small_objects",
     "fill_holes",
+    "remove_border_objects",
+    "apply_morphological_filters",
 ]

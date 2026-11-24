@@ -413,6 +413,81 @@ def erode_masks(
     return new_masks
 
 
+def remove_border_objects(masks: np.ndarray) -> np.ndarray:
+    """
+    Remove cells whose masks touch any image border.
+
+    Border objects have incomplete masks (clipped by the frame edge), so
+    their area and integrated density are underestimates. They must be
+    excluded before CTCF quantification.
+
+    Args:
+        masks: Label mask array
+
+    Returns:
+        Mask with border-touching cells set to 0
+    """
+    new_masks = masks.copy()
+
+    border_ids: set = set()
+    border_ids.update(masks[0, :])    # top row
+    border_ids.update(masks[-1, :])   # bottom row
+    border_ids.update(masks[:, 0])    # left column
+    border_ids.update(masks[:, -1])   # right column
+    border_ids.discard(0)             # background is not a cell
+
+    for cell_id in border_ids:
+        new_masks[new_masks == cell_id] = 0
+
+    return new_masks
+
+
+def apply_morphological_filters(
+    masks: np.ndarray,
+    min_solidity: float = 0.80,
+    max_eccentricity: float = 0.95,
+    min_circularity: float = 0.30,
+) -> np.ndarray:
+    """
+    Remove segmentation artifacts using shape-based quality filters.
+
+    Based on thresholds from McCloy et al. (Cell Cycle 13(9):1400-12, 2014)
+    and the SM-Watershed method:
+      - Solidity < min_solidity  → merged cells or concave artifacts
+      - Eccentricity > max_eccentricity → elongated fragments
+      - Circularity < min_circularity   → highly irregular shapes
+
+    Args:
+        masks: Label mask array
+        min_solidity: Minimum Area / ConvexHullArea (default 0.80)
+        max_eccentricity: Maximum eccentricity, 0=circle, 1=line (default 0.95)
+        min_circularity: Minimum 4π·Area / Perimeter² (default 0.30)
+
+    Returns:
+        Filtered mask with rejected cells set to 0
+    """
+    from skimage.measure import regionprops
+
+    new_masks = masks.copy()
+
+    for prop in regionprops(masks):
+        reject = False
+
+        if prop.solidity < min_solidity:
+            reject = True
+        elif prop.eccentricity > max_eccentricity:
+            reject = True
+        elif prop.perimeter > 0:
+            circularity = (4 * np.pi * prop.area) / (prop.perimeter ** 2)
+            if circularity < min_circularity:
+                reject = True
+
+        if reject:
+            new_masks[new_masks == prop.label] = 0
+
+    return new_masks
+
+
 def smooth_boundaries(
     masks: np.ndarray,
     sigma: float = 1.0

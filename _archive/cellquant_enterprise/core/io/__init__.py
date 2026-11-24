@@ -8,6 +8,10 @@ from cellquant_enterprise.core.io.image_loader import (
 )
 from cellquant_enterprise.core.io.mask_io import load_mask, save_mask, validate_mask
 from cellquant_enterprise.core.io.roi_export import save_rois_imagej, export_rois_zip
+from cellquant_enterprise.core.io.flatfield import (
+    FlatFieldCorrector,
+    estimate_shading_from_images,
+)
 
 __all__ = [
     "load_image",
@@ -19,4 +23,6 @@ __all__ = [
     "validate_mask",
     "save_rois_imagej",
     "export_rois_zip",
+    "FlatFieldCorrector",
+    "estimate_shading_from_images",
 ]

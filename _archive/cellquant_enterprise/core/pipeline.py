@@ -20,13 +20,19 @@ from cellquant_enterprise.core.io.image_loader import (
 )
 from cellquant_enterprise.core.io.mask_io import load_mask, save_mask
 from cellquant_enterprise.core.io.roi_export import save_rois_imagej
+from cellquant_enterprise.core.io.flatfield import FlatFieldCorrector
 from cellquant_enterprise.core.segmentation.cellpose_engine import (
     CellposeEngine, SegmentationParams, SegmentationResult
+)
+from cellquant_enterprise.core.segmentation.mask_utils import (
+    remove_border_objects, apply_morphological_filters
 )
 from cellquant_enterprise.core.quantification.ctcf import (
     calculate_ctcf_vectorized, quantify_multiple_markers, results_to_dataframe
 )
-from cellquant_enterprise.core.quantification.background import estimate_background
+from cellquant_enterprise.core.quantification.background import (
+    estimate_background, auto_detect_background_method
+)
 
 
 @dataclass
@@ -38,6 +44,26 @@ class ChannelConfig:
     marker_names: List[str] = field(default_factory=lambda: ["Marker1"])
     mitochondrial_markers: List[str] = field(default_factory=list)
     segmentation_channels: List[str] = field(default_factory=lambda: ["nuclear", "cyto"])
+
+
+@dataclass
+class QualityFilterConfig:
+    """
+    Configuration for post-segmentation quality filters.
+
+    Applied after Cellpose-SAM segmentation, before intensity measurement:
+      1. remove_border_objects: exclude cells touching image edges (incomplete masks)
+      2. apply_morphological_filters: reject artifacts by shape (solidity, eccentricity,
+         circularity) — thresholds from McCloy et al. Cell Cycle 2014
+      3. add_qc_flags: append per-cell QC columns to the output CSV
+    """
+    remove_border_objects: bool = True
+    apply_morphological_filters: bool = True
+    min_solidity: float = 0.80
+    max_eccentricity: float = 0.95
+    min_circularity: float = 0.30
+    add_qc_flags: bool = True
+    bit_depth: int = 16
 
 
 @dataclass
@@ -89,7 +115,9 @@ class BatchPipeline:
         self,
         n_workers: int = 4,
         use_gpu: bool = True,
-        batch_size: int = 4
+        batch_size: int = 4,
+        flat_field_corrector: Optional[FlatFieldCorrector] = None,
+        quality_filter_config: Optional[QualityFilterConfig] = None,
     ):
         """
         Initialize the pipeline.
@@ -98,10 +126,17 @@ class BatchPipeline:
             n_workers: Number of parallel workers for CPU operations
             use_gpu: Whether to use GPU for segmentation
             batch_size: Batch size for GPU segmentation
+            flat_field_corrector: Optional FlatFieldCorrector for illumination
+                correction. Applied to all channels before segmentation and
+                quantification. When None, raw images are used as-is.
+            quality_filter_config: Optional post-segmentation quality filters.
+                Defaults to QualityFilterConfig() (all filters enabled).
         """
         self.n_workers = n_workers
         self.use_gpu = use_gpu
         self.batch_size = batch_size
+        self.flat_field_corrector = flat_field_corrector
+        self.quality_filter_config = quality_filter_config or QualityFilterConfig()
         self._cancel_flag = threading.Event()
         self._engine = None
 
@@ -309,12 +344,20 @@ class BatchPipeline:
             return None
 
         nuclear_img = load_image(nuclear_path)
+
+        # --- Flat-field correction (applied to raw images before anything else) ---
+        ffc = self.flat_field_corrector
+        if ffc is not None and ffc.is_active:
+            nuclear_img = ffc.correct(nuclear_img, channel=config.nuclear_suffix)
+
         nuclear_norm = normalize_image(nuclear_img)
 
         cyto_img = load_image(cyto_path) if cyto_path else None
+        if cyto_img is not None and ffc is not None and ffc.is_active:
+            cyto_img = ffc.correct(cyto_img, channel=config.cyto_suffix)
         cyto_norm = normalize_image(cyto_img) if cyto_img is not None else None
 
-        # Stack channels for segmentation
+        # Stack channels for segmentation (normalized)
         if cyto_norm is not None:
             seg_input = np.stack([nuclear_norm, cyto_norm], axis=0)
         else:
@@ -334,38 +377,54 @@ class BatchPipeline:
             print(f"  Warning: No cells detected in {base_name}")
             return None
 
+        # --- Post-segmentation quality filters ---
+        qf = self.quality_filter_config
+        if qf.remove_border_objects:
+            masks = remove_border_objects(masks)
+        if qf.apply_morphological_filters:
+            masks = apply_morphological_filters(
+                masks,
+                min_solidity=qf.min_solidity,
+                max_eccentricity=qf.max_eccentricity,
+                min_circularity=qf.min_circularity,
+            )
+
+        if masks.max() == 0:
+            print(f"  Warning: All cells filtered out in {base_name}")
+            return None
+
         # Save outputs
         if save_outputs:
             set_output = output_folder / base_name
             set_output.mkdir(parents=True, exist_ok=True)
 
-            # Save masks
             save_mask(masks, set_output / f"{base_name}_masks.tif")
 
-            # Save overlay
             overlay = CellposeEngine.create_overlay(seg_input, masks)
             from skimage import io
             io.imsave(str(set_output / f"{base_name}_overlay.png"), overlay)
 
-            # Save ROIs
             save_rois_imagej(masks, set_output / f"{base_name}_rois.zip")
 
-        # Load marker images and quantify
+        # Load marker images (flat-field corrected, raw — NOT normalized)
         marker_images = {}
         for suffix, name in zip(config.marker_suffixes, config.marker_names):
             marker_path = image_paths.get(suffix.upper())
             if marker_path:
-                marker_images[name] = load_image(marker_path)
+                raw = load_image(marker_path)
+                if ffc is not None and ffc.is_active:
+                    raw = ffc.correct(raw, channel=suffix)
+                marker_images[name] = raw
 
         if not marker_images:
             print(f"  Warning: No marker channels for {base_name}")
             return None
 
-        # Estimate backgrounds
-        backgrounds = {
-            name: estimate_background(img, masks)
-            for name, img in marker_images.items()
-        }
+        # Estimate backgrounds (auto-select method per image characteristics)
+        backgrounds = {}
+        for name, img in marker_images.items():
+            method, _ = auto_detect_background_method(img, masks)
+            backgrounds[name] = estimate_background(img, masks, method=method)
 
         # Quantify all markers (parallel)
         results = quantify_multiple_markers(
@@ -377,12 +436,15 @@ class BatchPipeline:
             n_workers=self.n_workers
         )
 
-        # Convert to DataFrame
+        # Convert to DataFrame (with QC flags if configured)
         df = results_to_dataframe(
             results=results,
             condition=condition.name,
             image_set=base_name,
-            segmentation_type="cellular"
+            segmentation_type="cellular",
+            marker_images=marker_images if qf.add_qc_flags else None,
+            masks=masks if qf.add_qc_flags else None,
+            bit_depth=qf.bit_depth,
         )
 
         return df
