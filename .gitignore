@@ -1,0 +1,43 @@
+.worktrees/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Tool working directories
+.claude/
+.playwright-mcp/
+
+# Local data, backups and analysis output: never in git.
+# backup-predisk holds a copy of the user database (password hashes).
+backup-predisk/
+cellquant-v3/data/
+/CellQuant_Output*/
+/test dataset*/
+/segmentation_panels/
+/*.tif
+/*.tiff
+/*.sld
+/*.png
+/*.jpg
+/*.csv
+
+# Offline torch/CUDA wheels staged for Docker builds (~1.1 GB)
+cellquant-v3/wheels/
+
+# Built frontend; the Docker build produces it
+cellquant-v3/src/cellquant/static/*
+!cellquant-v3/src/cellquant/static/.gitkeep
+
+# Stray files from mistyped shell commands (pip ">=" redirects, Windows "nul")
+/2
+/=*
+/nul
+
+# Superseded single-stage Dockerfile; the real one is cellquant-v3/Dockerfile
+/Dockerfile

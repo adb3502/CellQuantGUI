@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Optional
 
+from cellquant.core.io.channel_detect import resolve_channel_path
 from cellquant.tasks.queue import TaskInfo, TaskQueue
 
 
@@ -135,7 +136,7 @@ def run_segmentation_task(
                 # Use exactly the channels the user selected for segmentation
                 loaded_channels = []
                 for suffix in seg_suffixes:
-                    ch_path = channels.get(suffix) or channels.get(suffix.upper()) or channels.get(suffix.lower())
+                    ch_path = resolve_channel_path(channels, suffix)
                     if ch_path:
                         img = load_image(ch_path)
                         loaded_channels.append(normalize_image(img))
@@ -149,13 +150,13 @@ def run_segmentation_task(
                     seg_input = np.stack(loaded_channels, axis=0)
             else:
                 # Default: cyto/brightfield channel only
-                cyto_path = channels.get(cyto_suffix) or channels.get(cyto_suffix.upper())
+                cyto_path = resolve_channel_path(channels, cyto_suffix)
                 if cyto_path:
                     cyto_img = load_image(cyto_path)
                     seg_input = normalize_image(cyto_img)
                 else:
                     # Fallback to nuclear if no cyto available
-                    nuc_path = channels.get(nuclear_suffix) or channels.get(nuclear_suffix.upper())
+                    nuc_path = resolve_channel_path(channels, nuclear_suffix)
                     if not nuc_path:
                         processed += 1
                         continue
@@ -216,7 +217,9 @@ def run_segmentation_task(
                 # Build visual composite from all channels (matching v1)
                 channel_imgs = [nuc_img.astype(np.float64)]
                 for suffix, ch_path in channels.items():
-                    if suffix in (nuclear_suffix, nuclear_suffix.upper()):
+                    if nuclear_suffix and suffix in (
+                        nuclear_suffix, nuclear_suffix.upper()
+                    ):
                         continue  # already loaded
                     if ch_path and Path(ch_path).exists():
                         channel_imgs.append(load_image(ch_path).astype(np.float64))
@@ -408,7 +411,18 @@ def run_quantification_task(
     )
     if mitochondrial_markers and nuclear_suffix_global:
         from cellquant.core.segmentation.cellpose_engine import CellposeEngine
-        use_gpu = quant_params.get("use_gpu", False)
+        use_gpu = quant_params.get("use_gpu", True)
+        # Reset CUDA context before loading a new Cellpose model — prevents CUBLAS
+        # errors when a previous GPU op (e.g. nellie or main segmentation) left the
+        # context in a dirty state.
+        if use_gpu:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
         print(
             f"[CellQuant] Initializing nuclear engine for mito correction "
             f"(model=nuclei, gpu={use_gpu}, nuclear_channel={nuclear_suffix_global})"
@@ -483,11 +497,26 @@ def run_quantification_task(
             else:
                 filtered_masks = masks
 
+            if not np.any(filtered_masks > 0):
+                print(
+                    f"[CellQuant] Skipping quantification for {cond_name}/{base_name}: "
+                    "no cells remain in the mask"
+                )
+                task.progress_data = {
+                    "quant_warning": {
+                        "condition": cond_name,
+                        "image_set": base_name,
+                        "reason": "no_cells_after_filtering",
+                    }
+                }
+                processed += 1
+                continue
+
             # ── Stage 2: Load marker images + preprocess ──────────
             channels = image_sets.get(base_name, {})
             marker_images = {}
             for suffix, name in zip(marker_suffixes, marker_names):
-                path = channels.get(suffix) or channels.get(suffix.upper())
+                path = resolve_channel_path(channels, suffix)
                 if path:
                     img = load_image(path)
                     if has_preprocessing:
@@ -591,6 +620,13 @@ def run_quantification_task(
         # ── Stage 5: Outlier detection ────────────────────────────
         combined = flag_outliers_in_dataframe(combined, threshold=outlier_threshold)
 
+        # ── Stage 6: JC-1 ratio ───────────────────────────────────
+        jc1_raw = quant_params.get("jc1")
+        if jc1_raw:
+            from cellquant.core.quantification.jc1 import JC1Config, add_jc1_ratio_column
+            jc1_cfg = JC1Config(**jc1_raw)
+            combined = add_jc1_ratio_column(combined, jc1_cfg)
+
         session.results_df = combined
         session.save_results()
         n_outliers = 0
@@ -605,6 +641,195 @@ def run_quantification_task(
         }
 
     return {"total_cells": 0, "conditions": 0, "qc_rejected": 0, "outliers_flagged": 0}
+
+
+def run_nellie_task(
+    task: TaskInfo,
+    queue: TaskQueue,
+    session,
+    nellie_params: dict,
+):
+    """Run nellie organelle analysis pipeline in a background thread.
+
+    For each condition + image-set that has a cell mask, we:
+      1. Locate the organelle channel TIFF.
+      2. Run nellie.run() via the wrapper.
+      3. Collect per-cell organelle features.
+      4. Merge results into the session's existing results_df
+         (or create a standalone DataFrame if CTCF hasn't been run yet).
+    """
+    from cellquant.core.quantification.nellie_wrapper import (
+        NellieParams,
+        run_nellie_on_image,
+    )
+    from cellquant.core.io.image_loader import load_image
+    import numpy as np
+    import pandas as pd
+
+    params_raw = nellie_params.get("nellie_params", {})
+    params = NellieParams(
+        channel_index=params_raw.get("channel_index", 0),
+        remove_edges=params_raw.get("remove_edges", False),
+        otsu_thresh_intensity=params_raw.get("otsu_thresh_intensity", False),
+        threshold=params_raw.get("threshold"),
+        device=params_raw.get("device", "auto"),
+        low_memory=params_raw.get("low_memory", False),
+        pixel_size_xy=params_raw.get("pixel_size_xy"),
+        pixel_size_z=params_raw.get("pixel_size_z"),
+        time_interval=params_raw.get("time_interval"),
+        include_levels=params_raw.get("include_levels", ["organelle", "branch"]),
+    )
+    channel_suffix = params_raw.get("channel_suffix", "")
+
+    # Ensure masks are loaded from disk if needed
+    if not session.masks or all(len(v) == 0 for v in session.masks.values()):
+        loaded_count = 0
+        for cond_name in session.conditions:
+            mask_dir = session.directory / "masks" / cond_name
+            if mask_dir.exists():
+                session.masks.setdefault(cond_name, {})
+                for npy_file in sorted(mask_dir.glob("*_masks.npy")):
+                    base = npy_file.stem.replace("_masks", "")
+                    session.masks[cond_name][base] = np.load(npy_file)
+                    loaded_count += 1
+        if loaded_count > 0:
+            print(f"[Nellie] Loaded {loaded_count} masks from disk")
+
+    total = sum(len(masks) for masks in session.masks.values())
+    task.total = total
+    processed = 0
+    all_dfs: list[pd.DataFrame] = []
+
+    for cond_name, cond_masks in session.masks.items():
+        if task.status == "cancelled":
+            break
+
+        cond_data = session.conditions.get(cond_name, {})
+        image_sets = cond_data.get("image_sets", {})
+
+        for base_name, masks in cond_masks.items():
+            if task.status == "cancelled":
+                break
+
+            queue.update_progress(
+                task,
+                current=processed,
+                stage="nellie",
+                condition=cond_name,
+                image_set=base_name,
+                message=f"Nellie: {cond_name}/{base_name}",
+            )
+
+            channels = image_sets.get(base_name, {})
+
+            # Locate the organelle channel file
+            image_path = None
+            if channel_suffix:
+                image_path = (
+                    channels.get(channel_suffix)
+                    or channels.get(channel_suffix.upper())
+                    or channels.get(channel_suffix.lower())
+                )
+            # Fallback: pick the first available channel
+            if not image_path and channels:
+                image_path = next(iter(channels.values()))
+
+            if not image_path:
+                print(f"[Nellie] Skipping {cond_name}/{base_name}: no channel file found")
+                processed += 1
+                continue
+
+            # Output directory: per-image-set subfolder so nellie doesn't clobber files
+            nellie_output_dir = (
+                session.directory / "nellie_output" / cond_name / base_name
+            )
+
+            try:
+                df = run_nellie_on_image(
+                    image_path=image_path,
+                    cell_masks=masks,
+                    output_dir=nellie_output_dir,
+                    condition=cond_name,
+                    image_set=base_name,
+                    params=params,
+                )
+                n_cells = len(df)
+                print(
+                    f"[Nellie] {cond_name}/{base_name}: {n_cells} cells, "
+                    f"{int(df['nellie_n_organelles'].sum()) if 'nellie_n_organelles' in df.columns else '?'} organelles"
+                )
+                if n_cells > 0:
+                    all_dfs.append(df)
+            except Exception as exc:
+                print(f"[Nellie] Error on {cond_name}/{base_name}: {exc}")
+
+            processed += 1
+
+    if not all_dfs:
+        return {"total_cells": 0, "conditions": 0}
+
+    nellie_combined = pd.concat(all_dfs, ignore_index=True)
+
+    # Merge into existing results_df if it exists; otherwise store standalone
+    if session.results_df is not None and len(session.results_df) > 0:
+        existing = session.results_df
+        merge_keys = ["Condition", "ImageSet", "CellID"]
+        # Only merge on keys that exist in both
+        shared_keys = [k for k in merge_keys if k in existing.columns and k in nellie_combined.columns]
+        if shared_keys:
+            # Drop any nellie columns already in existing to avoid duplicates
+            nellie_new_cols = [c for c in nellie_combined.columns if c not in shared_keys and c not in existing.columns]
+            if nellie_new_cols:
+                merged = existing.merge(
+                    nellie_combined[shared_keys + nellie_new_cols],
+                    on=shared_keys,
+                    how="left",
+                )
+                session.results_df = merged
+                print(f"[Nellie] Merged {len(nellie_new_cols)} new columns into existing results")
+            else:
+                print("[Nellie] All nellie columns already present — skipping merge")
+        session.save_results()
+    else:
+        # No prior quantification — try to load from disk first
+        session.load_results()
+        if session.results_df is not None and len(session.results_df) > 0:
+            # Results were on disk (e.g. after server restart) — merge into them
+            existing = session.results_df
+            merge_keys = ["Condition", "ImageSet", "CellID"]
+            shared_keys = [k for k in merge_keys if k in existing.columns and k in nellie_combined.columns]
+            if shared_keys:
+                nellie_new_cols = [c for c in nellie_combined.columns if c not in shared_keys and c not in existing.columns]
+                if nellie_new_cols:
+                    session.results_df = existing.merge(
+                        nellie_combined[shared_keys + nellie_new_cols],
+                        on=shared_keys,
+                        how="left",
+                    )
+                    print(f"[Nellie] Merged {len(nellie_new_cols)} columns into disk-loaded results")
+            session.save_results()
+        else:
+            # Truly standalone — make nellie results the primary results_df
+            session.results_df = nellie_combined
+            session.save_results()
+            print(f"[Nellie] No prior quantification — nellie results set as primary results")
+
+    return {
+        "total_cells": len(nellie_combined),
+        "conditions": nellie_combined["Condition"].nunique(),
+    }
+
+
+def _save_nellie_results(session, df: "pd.DataFrame") -> None:
+    """Persist standalone nellie results to disk."""
+    import pandas as pd
+    out_dir = session.directory / "nellie_output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_dir / "nellie_results.csv", index=False)
+    try:
+        df.to_parquet(out_dir / "nellie_results.parquet", index=False)
+    except Exception:
+        pass
 
 
 def run_tracking_task(
@@ -655,7 +880,7 @@ def run_tracking_task(
     imgs_list = []
     for name in sorted_names:
         channels = image_sets.get(name, {})
-        path = channels.get(nuclear_suffix) or channels.get(nuclear_suffix.upper())
+        path = resolve_channel_path(channels, nuclear_suffix)
         if path:
             imgs_list.append(load_image(path))
         else:
@@ -681,3 +906,340 @@ def run_tracking_task(
 
     n_tracks = len(set(masks_tracked[masks_tracked > 0].flatten()))
     return {"n_tracks": n_tracks, "n_frames": len(sorted_names)}
+
+
+def _estimate_frame_backgrounds(stack, masks):
+    """Per-frame background level outside the cell masks.
+
+    Spec 4.4 requires background-subtracted traces. A constant offset B in
+    F0 compresses dF/F0 by F_true0/(F_true0+B), so leaving it in
+    systematically understates every response.
+    """
+    import numpy as np
+
+    stack = np.asarray(stack, dtype=np.float64)
+    masks = np.asarray(masks)
+    out = np.zeros(stack.shape[0], dtype=np.float64)
+    for t in range(stack.shape[0]):
+        frame_mask = masks[t] if masks.ndim == 3 else masks
+        bg_pixels = stack[t][frame_mask == 0]
+        if bg_pixels.size == 0:
+            out[t] = 0.0
+        else:
+            out[t] = float(np.median(bg_pixels))
+    return out
+
+
+def build_projection(stack, mode: str = "max", percentile: float = 99.0):
+    """Collapse a (T, Y, X) recording to one 2-D image for segmentation.
+
+    The choice matters more than it looks. A MEAN projection was the original
+    default for SNR, but it works against the goal: a cell bright for 10 of
+    120 frames contributes 8% of its peak to the average, so exactly the
+    responding cells you care about are the ones it dilutes.
+
+    Measured on the Vasu IX83 dose series (13 recordings), foreground/
+    background contrast: mean 3.56, max 4.19, std 5.84 (medians). Max found
+    every cell mean found, plus one it missed.
+
+      max        - any cell that ever lit up. Good default.
+      percentile - max without the hot pixels and cosmic rays.
+      std        - pixels that CHANGED over time; the strongest discriminator,
+                   but a bright constant cell has std ~ 0 and disappears, which
+                   biases a dose series toward responders.
+      mean       - stable morphology, lowest noise, dilutes transients.
+    """
+    import numpy as np
+
+    stack = np.asarray(stack)
+    mode = (mode or "max").lower()
+    if mode == "mean":
+        return stack.mean(axis=0)
+    if mode == "std":
+        return stack.std(axis=0)
+    if mode == "percentile":
+        return np.percentile(stack, percentile, axis=0)
+    if mode == "max":
+        return stack.max(axis=0)
+    raise ValueError(
+        f"Unknown projection mode {mode!r}: "
+        "expected one of max, percentile, std, mean"
+    )
+
+
+def _persist_video_artifacts(session, condition, base_name, masks, projection):
+    """Keep the ROIs and the image they came from.
+
+    The video task used to segment, build traces, then discard the masks, so
+    there was no way to check which ROIs produced the numbers. Best-effort:
+    a failure to persist must never fail an analysis that already succeeded.
+    """
+    import numpy as np
+
+    try:
+        session.video_masks.setdefault(condition, {})[base_name] = masks
+        session.video_projections.setdefault(condition, {})[base_name] = projection
+        np.save(session.get_video_mask_path(condition, base_name), masks)
+        np.save(session.get_video_projection_path(condition, base_name),
+                np.asarray(projection, dtype=np.float32))
+    except Exception as exc:
+        print(f"[CellQuant] Warning: could not persist video artifacts "
+              f"for {condition}/{base_name}: {exc}")
+
+
+def _build_trace_tables(stack, masks, condition, image_set, config,
+                        subtract_background=True):
+    """Build the long traces table and the per-cell summary table."""
+    import numpy as np
+    import pandas as pd
+
+    from cellquant.core.quantification.temporal import (
+        compute_baseline,
+        compute_dff,
+        extract_traces,
+        summarize_trace,
+    )
+
+    traces = extract_traces(stack, masks)
+    backgrounds = (_estimate_frame_backgrounds(stack, masks)
+                   if subtract_background else np.zeros(np.shape(stack)[0]))
+    trace_rows = []
+    summary_rows = []
+
+    tracked = np.asarray(masks).ndim == 3
+    for cell_id, trace in sorted(traces.items()):
+        corrected = np.asarray(trace, dtype=np.float64) - backgrounds
+        f0 = compute_baseline(corrected, config)
+        dff = compute_dff(corrected, f0)
+        summary = summarize_trace(corrected, config, cell_id=cell_id)
+
+        for frame, (raw, corr, d) in enumerate(zip(trace, corrected, dff)):
+            trace_rows.append({
+                "Condition": condition,
+                "ImageSet": image_set,
+                "CellID": int(cell_id),
+                "TrackID": int(cell_id) if tracked else None,
+                "Frame": int(frame),
+                "Time_s": frame * config.interval_s if config.interval_s else None,
+                "F_raw": float(raw),
+                "F_bg_corrected": float(corr),
+                "dF_F0": float(d),
+            })
+
+        summary_rows.append({
+            "Condition": condition,
+            "ImageSet": image_set,
+            "CellID": int(cell_id),
+            "TrackID": int(cell_id) if tracked else None,
+            "baseline_f0": summary.baseline_f0,
+            "baseline_is_fallback": summary.baseline_is_fallback,
+            "peak_dF_F0": summary.peak_dff,
+            "peak_frame": summary.peak_frame,
+            "time_to_peak_s": summary.time_to_peak_s,
+            "auc": summary.auc,
+            "rise_time_10_90": summary.rise_time_10_90,
+            "decay_tau_frames": summary.decay_tau_frames,
+            "decay_tau_s": summary.decay_tau_s,
+            "snr": summary.snr,
+            "n_events": summary.n_events,
+            "event_freq_hz": summary.event_freq_hz,
+        })
+
+    return pd.DataFrame(trace_rows), pd.DataFrame(summary_rows)
+
+
+def run_video_task(task, queue, session, video_params: dict) -> dict:
+    """Analyse time-lapse videos: traces, response metrics, dose-response."""
+    import numpy as np
+    import pandas as pd
+
+    from cellquant.core.io.image_loader import load_timelapse, normalize_image
+    from cellquant.core.quantification.temporal import TemporalConfig
+
+    config = TemporalConfig(
+        baseline_mode=video_params.get("baseline_mode", "fraction"),
+        baseline_fraction=video_params.get("baseline_fraction", 0.10),
+        stim_frame=video_params.get("stim_frame"),
+        interval_s=video_params.get("interval_s"),
+        detrend=video_params.get("detrend", False),
+        event_threshold_sigma=video_params.get("event_threshold_sigma", 3.0),
+        event_refractory_frames=video_params.get("event_refractory_frames", 5),
+    )
+    mode = video_params.get("mode", "static_roi")
+    only_condition = video_params.get("condition")
+    session.video_params = dict(video_params)
+
+    targets = []
+    for cond_name, cond in session.conditions.items():
+        if only_condition and cond_name != only_condition:
+            continue
+        for base_name, channels in cond.get("image_sets", {}).items():
+            path = next(iter(channels.values()))
+            targets.append((cond_name, base_name, path))
+
+    queue.update_progress(task, current=0, total=len(targets) or 1,
+                          stage="video", message="Starting video analysis")
+
+    all_traces, all_summaries = [], []
+    engine = None
+
+    for idx, (cond_name, base_name, path) in enumerate(targets):
+        if task.status == "cancelled":
+            break
+
+        queue.update_progress(task, current=idx, total=len(targets), stage="video",
+                              condition=cond_name, image_set=base_name,
+                              message=f"Analysing {base_name}")
+
+        stack, meta = load_timelapse(path)
+        stack = np.asarray(stack, dtype=np.float64)
+
+        proj_mode = video_params.get("projection", "max")
+        projection = build_projection(
+            stack, proj_mode, video_params.get("projection_percentile", 99.0)
+        )
+
+        if mode == "whole_field":
+            masks = np.ones(stack.shape[1:], dtype=np.int32)
+        else:
+            # Build the model once per run, on first use. Loading Cellpose
+            # costs seconds; doing it per video multiplied that by every
+            # recording in the experiment.
+            if engine is None:
+                from cellquant.core.segmentation.cellpose_engine import CellposeEngine
+                engine = CellposeEngine(model_type=video_params.get("model_type", "cpsam"))
+            result = engine.segment_single(
+                normalize_image(projection),
+                diameter=video_params.get("diameter", 30.0),
+            )
+            masks = result.masks
+            print(f"{base_name}: segmented {result.n_cells} cells "
+                  f"on {proj_mode} projection")
+
+        # Keep the ROIs and the image they came from, so the user can SEE
+        # which cells produced the numbers.
+        _persist_video_artifacts(session, cond_name, base_name, masks, projection)
+
+        traces_df, summary_df = _build_trace_tables(
+            stack, masks, cond_name, base_name, config
+        )
+        all_traces.append(traces_df)
+        all_summaries.append(summary_df)
+
+    traces_df = pd.concat(all_traces, ignore_index=True) if all_traces else pd.DataFrame()
+    summary_df = (pd.concat(all_summaries, ignore_index=True)
+                  if all_summaries else pd.DataFrame())
+
+    session.traces_df = traces_df
+    session.trace_summary_df = summary_df
+
+    try:
+        results_dir = session.directory / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if not traces_df.empty:
+            traces_df.to_parquet(results_dir / "video_traces.parquet")
+            summary_df.to_parquet(results_dir / "video_summary.parquet")
+            summary_df.to_csv(results_dir / "video_summary.csv", index=False)
+    except Exception as exc:
+        print(f"Warning: could not persist video results: {exc}")
+
+    queue.update_progress(task, current=len(targets), total=len(targets) or 1,
+                          stage="video", message="Video analysis complete")
+
+    return {
+        "videos_processed": len(targets),
+        "cells_analysed": int(summary_df["CellID"].count()) if not summary_df.empty else 0,
+        "conditions": sorted({c for c, _, _ in targets}),
+    }
+
+
+def run_sabetagal_task(task, queue, session, sabetagal_params: dict) -> dict:
+    """Quantify SA-beta-gal brightfield staining and merge into results."""
+    import numpy as np
+    import pandas as pd
+
+    from cellquant.core.io.image_loader import load_rgb, normalize_image
+    from cellquant.core.quantification.sabetagal import (
+        SABetaGalConfig,
+        quantify_sabetagal,
+        summarize_positivity,
+    )
+
+    config = SABetaGalConfig(
+        white_percentile=sabetagal_params.get("white_percentile", 95.0),
+        chromogen_index=sabetagal_params.get("chromogen_index", 0),
+        threshold=sabetagal_params.get("threshold"),
+        stain_vectors=sabetagal_params.get("stain_vectors"),
+        min_area=sabetagal_params.get("min_area", 10),
+    )
+    only_condition = sabetagal_params.get("condition")
+
+    targets = []
+    for cond_name, cond in session.conditions.items():
+        if only_condition and cond_name != only_condition:
+            continue
+        for base_name, channels in cond.get("image_sets", {}).items():
+            targets.append((cond_name, base_name, next(iter(channels.values()))))
+
+    queue.update_progress(task, current=0, total=len(targets) or 1,
+                          stage="sabetagal", message="Starting SA-beta-gal analysis")
+
+    frames = []
+    for idx, (cond_name, base_name, path) in enumerate(targets):
+        if task.status == "cancelled":
+            break
+
+        queue.update_progress(task, current=idx, total=len(targets),
+                              stage="sabetagal", condition=cond_name,
+                              image_set=base_name, message=f"Analysing {base_name}")
+
+        rgb = load_rgb(path)
+
+        masks = session.masks.get(cond_name, {}).get(base_name)
+        if masks is None:
+            from cellquant.core.segmentation.cellpose_engine import CellposeEngine
+            gray = 255.0 - np.asarray(rgb, dtype=np.float64).mean(axis=-1)
+            engine = CellposeEngine(
+                model_type=sabetagal_params.get("model_type", "cyto3"))
+            result = engine.segment_single(
+                normalize_image(gray),
+                diameter=sabetagal_params.get("diameter", 30.0),
+            )
+            masks = result.masks
+            print(f"{base_name}: segmented {result.n_cells} cells")
+
+        frames.append(quantify_sabetagal(rgb, masks, config, cond_name, base_name))
+
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    session.sabetagal_df = df
+
+    summary = summarize_positivity(df)
+
+    try:
+        results_dir = session.directory / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if not df.empty:
+            df.to_parquet(results_dir / "sabetagal_results.parquet")
+            summary.to_csv(results_dir / "sabetagal_summary.csv", index=False)
+    except Exception as exc:
+        print(f"Warning: could not persist SA-beta-gal results: {exc}")
+
+    if not df.empty and session.results_df is not None:
+        try:
+            keys = ["Condition", "ImageSet", "CellID"]
+            session.results_df = session.results_df.merge(
+                df[keys + ["mean_OD", "integrated_OD", "is_positive"]],
+                on=keys, how="left",
+            )
+        except Exception as exc:
+            print(f"Warning: merge into results_df failed: {exc}")
+
+    queue.update_progress(task, current=len(targets), total=len(targets) or 1,
+                          stage="sabetagal", message="SA-beta-gal analysis complete")
+
+    return {
+        "images_processed": len(targets),
+        "total_cells": int(len(df)),
+        "summary": summary.to_dict(orient="records"),
+        "provisional": True,  # uncalibrated stain vectors - see spec 9.2
+    }

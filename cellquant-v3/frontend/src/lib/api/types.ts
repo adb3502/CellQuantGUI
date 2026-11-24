@@ -27,6 +27,13 @@ export interface DetectionResult {
 	suggested_markers: string[];
 	channel_wavelengths?: Record<string, number>;  // suffix -> nm
 	channel_colors?: Record<string, string>;       // suffix -> hex from wavelength
+	// What kind of data this is, so the UI can route the user. A 120-frame
+	// recording is indistinguishable from a single image without this.
+	data_type?: 'image' | 'timelapse' | 'zstack';
+	n_frames_typical?: number;
+	mixed_data_types?: boolean;
+	acquisition_channel?: string | null;
+	objective?: string | null;
 }
 
 export interface ScanResponse {
@@ -88,6 +95,8 @@ export interface SegmentationStatus {
 	message: string;
 	elapsed_seconds: number;
 	result?: { total_cells?: number; images_processed?: number };
+	/** Full traceback when status is 'error'. */
+	error?: string | null;
 }
 
 // ── Tracking ─────────────────────────────────────────────

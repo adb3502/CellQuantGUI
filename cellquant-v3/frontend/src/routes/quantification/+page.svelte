@@ -5,7 +5,7 @@
 	import { ProgressSocket } from '$api/websocket';
 	import type { ProgressMessage, QCFilterParams } from '$api/types';
 	import { sessionId } from '$stores/session';
-	import { detection } from '$stores/experiment';
+	import { detection, channelRoles } from '$stores/experiment';
 	import { quantTaskId } from '$stores/quantification';
 	import TaskStatus from '$components/progress/TaskStatus.svelte';
 
@@ -45,8 +45,16 @@
 	let negControlPath = $state('');
 	let manualBgValue = $state<string>('');
 
-	let markerSuffixes = $derived($detection?.suggested_markers ?? []);
-	let markerNames = $derived(markerSuffixes.map((s: string) => s));
+	let markerSuffixes = $derived(
+		$channelRoles.filter(r => r.quantify && !r.excluded).length > 0
+			? $channelRoles.filter(r => r.quantify && !r.excluded).map(r => r.suffix)
+			: ($detection?.suggested_markers ?? [])
+	);
+	let markerNames = $derived(
+		$channelRoles.filter(r => r.quantify && !r.excluded).length > 0
+			? $channelRoles.filter(r => r.quantify && !r.excluded).map(r => r.name || r.suffix)
+			: markerSuffixes.map((s: string) => s)
+	);
 
 	function connectWebSocket() {
 		if (!$sessionId || socket) return;

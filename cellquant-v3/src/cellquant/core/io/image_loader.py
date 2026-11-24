@@ -33,9 +33,22 @@ class ImageMetadata:
     size_bytes: int
 
 
+class TimelapseInputError(ValueError):
+    """Raised when a multi-frame time-lapse is passed to a single-image path.
+
+    load_image() used to collapse a 120-frame recording to its middle frame
+    and return it with no warning, so segmentation silently reported a result
+    computed from 1/120th of the data. Failing loudly is the only safe
+    behaviour: a wrong number that looks right is worse than an error.
+    """
+
+
 def load_image(
     image_path: Union[str, Path],
-    channel: Optional[int] = None
+    channel: Optional[int] = None,
+    *,
+    frame: Optional[int] = None,
+    allow_timelapse: bool = False,
 ) -> np.ndarray:
     """
     Load an image with robust multi-dimensional handling.
@@ -65,6 +78,25 @@ def load_image(
         img = io.imread(str(image_path))
     except Exception as e:
         raise IOError(f"Failed to load image {image_path}: {e}")
+
+    # A multi-frame time-lapse must not silently become one frame. Classify
+    # before collapsing: a z-stack keeps the middle-slice behaviour, which is
+    # a legitimate projection, but a recording does not.
+    if img.ndim == 3 and frame is None and not allow_timelapse:
+        from cellquant.core.io.data_type import DataType, probe_file
+
+        info = probe_file(image_path)
+        if info.data_type == DataType.TIMELAPSE:
+            raise TimelapseInputError(
+                f"{image_path.name} is a {info.n_frames}-frame time-lapse, not a "
+                f"single image. Loading it here would use only one frame and "
+                f"discard the other {info.n_frames - 1}. Use Video Analytics to "
+                f"analyse this recording, or pass frame=<n> to read one frame "
+                f"deliberately."
+            )
+
+    if frame is not None and img.ndim == 3:
+        img = img[int(frame)]
 
     # Handle multi-dimensional arrays
     if img.ndim > 2:
@@ -336,3 +368,130 @@ def find_images_by_suffix(
             grouped[base_name][suffix.upper()] = file
 
     return grouped
+
+
+@dataclass
+class TimelapseMeta:
+    """Metadata for a multi-frame time-lapse acquisition."""
+
+    path: Path
+    n_frames: int
+    shape: Tuple[int, int]
+    dtype: str
+    channel_name: Optional[str] = None
+    objective: Optional[str] = None
+    interval_s: Optional[float] = None  # user-supplied; never inferred
+    size_bytes: int = 0
+
+
+def _read_slidebook_tags(tif) -> Tuple[Optional[str], Optional[str]]:
+    """Pull channel name / objective from SlideBook private TIFF tags."""
+    channel_name = objective = None
+    try:
+        page = tif.pages[0]
+        tag = page.tags.get(65004)
+        if tag is not None:
+            channel_name = str(tag.value).strip() or None
+        tag = page.tags.get(65003)
+        if tag is not None:
+            objective = str(tag.value).strip() or None
+    except Exception:
+        pass
+    return channel_name, objective
+
+
+def load_timelapse(
+    image_path: Union[str, Path],
+    *,
+    channel: Optional[int] = None,
+    memmap: bool = True,
+) -> Tuple[np.ndarray, TimelapseMeta]:
+    """Load a multi-frame TIFF as a (T, Y, X) stack.
+
+    Unlike load_image(), this never collapses the leading axis.
+    """
+    import tifffile
+
+    image_path = Path(image_path)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    with tifffile.TiffFile(str(image_path)) as tif:
+        channel_name, objective = _read_slidebook_tags(tif)
+        arr = None
+        if memmap:
+            # Not every TIFF is mappable: SlideBook writes one strip per
+            # frame, which tifffile cannot memory-map. Fall back to a
+            # normal read rather than failing the load.
+            try:
+                arr = tifffile.memmap(str(image_path))
+            except (ValueError, MemoryError):
+                arr = None
+        if arr is None:
+            arr = tif.asarray()
+
+    arr = np.asarray(arr)
+
+    if arr.ndim == 2:
+        arr = arr[np.newaxis, ...]
+    elif arr.ndim == 4:
+        # (T, C, Y, X) or (T, Y, X, C) -> pick a channel
+        idx = 0 if channel is None else channel
+        if arr.shape[1] <= 5:
+            arr = arr[:, idx, :, :]
+        elif arr.shape[-1] <= 5:
+            arr = arr[:, :, :, idx]
+        else:
+            raise ValueError(f"Cannot interpret 4-D shape {arr.shape}")
+    elif arr.ndim != 3:
+        raise ValueError(f"Unsupported dimensionality {arr.ndim} for {image_path}")
+
+    meta = TimelapseMeta(
+        path=image_path,
+        n_frames=int(arr.shape[0]),
+        shape=(int(arr.shape[1]), int(arr.shape[2])),
+        dtype=str(arr.dtype),
+        channel_name=channel_name,
+        objective=objective,
+        interval_s=None,
+        size_bytes=image_path.stat().st_size,
+    )
+    return arr, meta
+
+
+def is_timelapse_candidate(image_path: Union[str, Path], min_frames: int = 2) -> bool:
+    """True when a TIFF holds enough frames to be treated as a time series."""
+    import tifffile
+
+    try:
+        with tifffile.TiffFile(str(image_path)) as tif:
+            return len(tif.pages) >= min_frames
+    except Exception:
+        return False
+
+
+def load_rgb(image_path: Union[str, Path]) -> np.ndarray:
+    """Load a brightfield image as true colour (Y, X, 3).
+
+    Unlike load_image(), this never reduces RGB to a single channel.
+    """
+    image_path = Path(image_path)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    try:
+        import tifffile
+        arr = tifffile.imread(str(image_path))
+    except Exception:
+        from skimage import io
+        arr = io.imread(str(image_path))
+
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    elif arr.ndim == 3 and arr.shape[0] in (3, 4) and arr.shape[-1] not in (3, 4):
+        arr = np.moveaxis(arr, 0, -1)
+
+    if arr.ndim != 3 or arr.shape[-1] < 3:
+        raise ValueError(f"Not an RGB image: shape {arr.shape}")
+    return arr[:, :, :3]

@@ -42,6 +42,20 @@ class Session:
     # Results
     results_df: Optional[pd.DataFrame] = None
 
+    # Video analytics
+    traces_df: Optional[pd.DataFrame] = None
+    trace_summary_df: Optional[pd.DataFrame] = None
+    # ROIs the video analysis segmented, kept separate from `masks` so a video
+    # run never overwrites a segmentation result for the same image set.
+    video_masks: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
+    video_projections: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
+    # Parameters of the last video run. The pixel activity overlay needs the
+    # run's own baseline window to compute dF/F0 the same way the traces did.
+    video_params: Dict[str, any] = field(default_factory=dict)
+
+    # SA-beta-gal analytics
+    sabetagal_df: Optional[pd.DataFrame] = None
+
     @property
     def edit_history(self):
         """Lazy-init edit history."""
@@ -67,6 +81,20 @@ class Session:
         p = self.directory / "masks" / condition
         p.mkdir(parents=True, exist_ok=True)
         return p / f"{base_name}_masks.npy"
+
+    def get_video_mask_path(self, condition: str, base_name: str) -> Path:
+        """ROIs from a video run. Distinct from get_mask_path so the two
+        analyses can coexist for the same image set."""
+        p = self.directory / "masks" / condition
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"{base_name}_video_masks.npy"
+
+    def get_video_projection_path(self, condition: str, base_name: str) -> Path:
+        """The projection the ROIs were segmented from - needed to render an
+        overlay the user can check."""
+        p = self.directory / "projections" / condition
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"{base_name}_projection.npy"
 
     def get_nuclear_mask_path(self, condition: str, base_name: str) -> Path:
         p = self.directory / "masks" / condition
@@ -107,14 +135,22 @@ class Session:
             json.dump(state, f, indent=2)
 
     def save_results(self):
-        """Save results DataFrame as Parquet."""
+        """Save results DataFrame as Parquet and update the live CSV."""
         if self.results_df is not None and len(self.results_df) > 0:
             self.results_df.to_parquet(self.get_results_path(), index=False)
+            # Also keep a live CSV so users can open it without triggering an export
+            csv_path = self.directory / "results" / "cellquant_results.csv"
+            self.results_df.to_csv(csv_path, index=False)
 
     def load_results(self) -> Optional[pd.DataFrame]:
-        """Load results from Parquet if available."""
+        """Load results from Parquet if available, falling back to nellie standalone CSV."""
         path = self.get_results_path()
         if path.exists():
             self.results_df = pd.read_parquet(path)
+            return self.results_df
+        # Fall back to nellie standalone CSV if quantification was never run
+        nellie_csv = self.directory / "nellie_output" / "nellie_results.csv"
+        if nellie_csv.exists():
+            self.results_df = pd.read_csv(nellie_csv)
             return self.results_df
         return None

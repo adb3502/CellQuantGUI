@@ -127,7 +127,7 @@ class CellposeEngine:
             else:
                 self._model = models.CellposeModel(
                     gpu=self.use_gpu,
-                    model_type=self.model_type,
+                    pretrained_model=self.model_type,
                 )
         return self._model
 

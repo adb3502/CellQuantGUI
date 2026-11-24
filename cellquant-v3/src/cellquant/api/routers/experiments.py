@@ -1,12 +1,14 @@
 """Experiment scanning and condition management."""
 
 import asyncio
+import re
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cellquant.api.dependencies import get_session_manager, get_session
+from cellquant.auth.middleware import CurrentUser, get_current_user
 from cellquant.api.schemas.experiments import (
     ScanRequest,
     ScanResponse,
@@ -97,34 +99,136 @@ def _extract_wavelengths(image_sets: dict, first_n: int = 1) -> dict[str, float]
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
 
+_WINDOWS_DRIVE_RE = re.compile(r"^(?P<drive>[a-zA-Z]):[\\/](?P<rest>.*)$")
+
+
+def _resolve_container_path(raw_path: str | None) -> Path | None:
+    """Translate host Windows paths into the matching runtime-visible path."""
+    if not raw_path:
+        return None
+
+    match = _WINDOWS_DRIVE_RE.match(raw_path.strip())
+    if not match:
+        return Path(raw_path)
+
+    # Native Windows runtime: use the original host path directly.
+    direct = Path(raw_path)
+    if direct.exists():
+        return direct
+
+    # Docker runtime: rewrite D:\foo -> /mnt/host/d/foo when that mount exists.
+    drive = match.group("drive").lower()
+    rest = match.group("rest").replace("\\", "/")
+    mounted = Path(f"/mnt/host/{drive}/{rest}")
+    if mounted.exists() or Path(f"/mnt/host/{drive}").exists():
+        return mounted
+
+    return direct
+
+# Registry: username -> picker port (populated by the picker agent on startup)
+_picker_registry: dict[str, int] = {}
+
+# The picker agent refuses /pick without this header, so web pages in the
+# user's browser cannot trigger it. Must match PICKER_HEADER in
+# cellquant-picker.py.
+PICKER_HEADER = "X-CellQuant-Picker"
+
+
+
+def _summarise_folder_data_type(folder):
+    """Classify a condition folder as images / time-lapse / z-stacks.
+
+    Header-only: these files are 63 MB each and a scan touches every one, so
+    this never decodes pixel data.
+    """
+    from pathlib import Path
+
+    from cellquant.core.io.data_type import probe_file, summarise_data_types
+
+    folder = Path(folder)
+    files = [f for f in sorted(folder.glob("*"))
+             if f.is_file() and f.suffix.lower() in (".tif", ".tiff")]
+    # A handful is enough to characterise a folder; probing hundreds of
+    # headers would slow the scan for no extra information.
+    return summarise_data_types([probe_file(f) for f in files[:12]])
+
+def _is_loopback(request: Request) -> bool:
+    import ipaddress
+
+    host = request.client.host if request.client else None
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@router.post("/picker-register")
+async def picker_register(req: dict, request: Request) -> dict:
+    """Called by cellquant-picker.py on startup to register its port.
+
+    Body: { "username": "adb", "port": 7863 }
+
+    No login, so it is restricted to the local machine instead. The server
+    listens on 0.0.0.0 with host networking, so without this check any
+    machine on the network could register a port under any username, and
+    /browse would POST to it and hand that user whatever "folder" it
+    returned. The picker runs on this host and registers from 127.0.0.1.
+    """
+    if not _is_loopback(request):
+        raise HTTPException(403, "Picker registration is only accepted from this machine")
+    username = str(req.get("username", "")).strip().lower()
+    try:
+        port = int(req.get("port", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "port must be an integer")
+    if username and 0 < port < 65536:
+        _picker_registry[username] = port
+    return {"ok": True}
+
 
 @router.post("/browse")
-async def browse_folder() -> dict:
-    """Open a native OS folder picker dialog and return the selected path.
+async def browse_folder(
+    req: dict = None,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Open native Windows folder picker in the calling user's RDP session.
 
-    Falls back gracefully if no display is available (remote access).
+    The picker agent (cellquant-picker.py) must be running in their session
+    and will have registered its port via /picker-register on startup.
+    Returns {"path": "C:/selected/folder"} or {"path": null}.
     """
-    result: dict = {"path": None}
+    import httpx
 
-    def _open_dialog():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
+    username = current_user.username.lower()
+    registered_port = _picker_registry.get(username)
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            root.focus_force()
-            path = filedialog.askdirectory(title="Select Experiment Folder")
-            root.destroy()
-            if path:
-                result["path"] = path
-        except Exception:
-            result["path"] = None
+    # Shared-workstation fallback: the per-user registry assumes each user has
+    # their own Windows session (RDP), but on a shared lab machine one picker
+    # serves whoever is at the keyboard. If this user has no picker of their
+    # own and exactly one is registered, use it — an ambiguous multi-picker
+    # setup still requires an exact match.
+    if not registered_port and len(_picker_registry) == 1:
+        registered_port = next(iter(_picker_registry.values()))
 
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _open_dialog)
-    return {"path": result["path"]}
+    if not registered_port:
+        return {"path": None, "error": "picker_not_running"}
+
+    # The picker runs on the Windows host; inside Docker, reach it via host.docker.internal.
+    # Fall back to 127.0.0.1/localhost for non-Docker (local dev) environments.
+    hosts = ["host.docker.internal", "127.0.0.1", "localhost"]
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for host in hosts:
+            try:
+                resp = await client.post(f"http://{host}:{registered_port}/pick",
+                                         headers={PICKER_HEADER: "1"})
+                resp.raise_for_status()
+                return {"path": resp.json().get("path")}
+            except Exception:
+                continue
+
+    return {"path": None, "error": "picker_not_running"}
 
 
 @router.post("/list-dir")
@@ -182,13 +286,13 @@ async def list_directory(req: dict) -> dict:
 @router.post("/scan", response_model=ScanResponse)
 async def scan_experiment(req: ScanRequest):
     """Scan a folder for experimental conditions and auto-detect channels."""
-    folder = Path(req.path)
+    folder = _resolve_container_path(req.path)
     if not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {req.path}")
 
     # Determine output directory
     if req.output_path:
-        output_dir = Path(req.output_path)
+        output_dir = _resolve_container_path(req.output_path)
     else:
         output_dir = folder.parent / f"{folder.name}_output"
 
@@ -234,6 +338,7 @@ async def scan_experiment(req: ScanRequest):
         conditions.append(cond)
 
         # Store in session
+        _dt_summary = _summarise_folder_data_type(subdir)
         session.conditions[subdir.name] = {
             "name": subdir.name,
             "path": str(subdir),
@@ -246,6 +351,8 @@ async def scan_experiment(req: ScanRequest):
             "nuclear_suffix": detection.suggested_nuclear,
             "cyto_suffix": detection.suggested_cyto,
             "suggested_markers": detection.suggested_markers,
+            "data_type": _dt_summary.data_type.value,
+            "n_frames": _dt_summary.n_frames_typical,
         }
 
     session.experiment_path = folder
@@ -273,6 +380,17 @@ async def scan_experiment(req: ScanRequest):
                 if inferred:
                     channel_colors[suffix] = inferred
 
+        # Aggregate across ALL conditions: a folder that mixes videos and
+        # stills must say so rather than inherit whatever the first one was.
+        from cellquant.core.io.data_type import DataType, DataTypeInfo, summarise_data_types
+
+        _agg_infos = []
+        for _c in session.conditions.values():
+            _n = int(_c.get("n_frames", 1) or 1)
+            _t = _c.get("data_type", "image")
+            _agg_infos.append(DataTypeInfo(DataType(_t), _n))
+        _agg = summarise_data_types(_agg_infos)
+
         det_response = DetectionResult(
             channel_suffixes=first_cond.get("channel_suffixes", []),
             n_channels=len(first_cond.get("channel_suffixes", [])),
@@ -284,6 +402,11 @@ async def scan_experiment(req: ScanRequest):
             suggested_markers=first_cond.get("suggested_markers", []),
             channel_wavelengths=wavelengths,
             channel_colors=channel_colors,
+            data_type=_agg.data_type.value,
+            n_frames_typical=_agg.n_frames_typical,
+            mixed_data_types=_agg.mixed,
+            acquisition_channel=_agg.channel_name,
+            objective=_agg.objective,
         )
 
     return ScanResponse(
@@ -323,7 +446,7 @@ async def set_output_path(session_id: str, req: SetOutputRequest):
 
     session = get_session(session_id)
     old_dir = session.directory
-    new_dir = Path(req.output_path)
+    new_dir = _resolve_container_path(req.output_path)
 
     if old_dir == new_dir:
         return {"status": "ok", "output_path": str(new_dir)}
@@ -389,14 +512,14 @@ async def configure_preprocessing(session_id: str, req: PreprocessingRequest):
 
     if req.dark_frame_paths:
         try:
-            dark = load_dark_frames([Path(p) for p in req.dark_frame_paths])
+            dark = load_dark_frames([_resolve_container_path(p) for p in req.dark_frame_paths])
             session.dark_master = dark
         except Exception as e:
             warnings.append(f"Dark frame loading failed: {e}")
 
     if req.flat_field_paths:
         try:
-            flat = load_flat_field([Path(p) for p in req.flat_field_paths])
+            flat = load_flat_field([_resolve_container_path(p) for p in req.flat_field_paths])
             session.flat_norm = flat
         except Exception as e:
             warnings.append(f"Flat field loading failed: {e}")
@@ -422,3 +545,32 @@ async def configure_channels(session_id: str, config: ChannelConfigSchema):
     }
     session.save_state()
     return {"status": "ok"}
+
+
+@router.post("/{session_id}/save-channel-roles")
+async def save_channel_roles(session_id: str, body: dict):
+    """Save full channel role configuration to disk next to the experiment folder."""
+    import json
+    session = get_session(session_id)
+    if not session.experiment_path:
+        raise HTTPException(400, "No experiment folder loaded")
+    config_path = Path(session.experiment_path) / ".cellquant_channel_config.json"
+    config_path.write_text(json.dumps(body.get("roles", []), indent=2), encoding="utf-8")
+    return {"status": "ok", "path": str(config_path)}
+
+
+@router.get("/{session_id}/load-channel-roles")
+async def load_channel_roles(session_id: str):
+    """Load saved channel role configuration from disk."""
+    import json
+    session = get_session(session_id)
+    if not session.experiment_path:
+        return {"roles": None}
+    config_path = Path(session.experiment_path) / ".cellquant_channel_config.json"
+    if not config_path.exists():
+        return {"roles": None}
+    try:
+        roles = json.loads(config_path.read_text(encoding="utf-8"))
+        return {"roles": roles, "path": str(config_path)}
+    except Exception:
+        return {"roles": None}

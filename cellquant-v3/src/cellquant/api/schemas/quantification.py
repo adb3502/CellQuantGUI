@@ -18,6 +18,16 @@ class QCFilterParams(BaseModel):
     max_aspect_ratio: Optional[float] = None
 
 
+class JC1Params(BaseModel):
+    """JC-1 mitochondrial membrane potential ratio settings."""
+
+    enabled: bool = False
+    red_marker: str = "JC1_Red"
+    green_marker: str = "JC1_Green"
+    min_area: int = 50
+    require_positive: bool = True
+
+
 class QuantificationRequest(BaseModel):
     session_id: str
     background_method: str = "auto"
@@ -25,9 +35,11 @@ class QuantificationRequest(BaseModel):
     marker_names: List[str] = []
     mitochondrial_markers: List[str] = []
     qc_filters: QCFilterParams = QCFilterParams()
+    jc1: JC1Params = JC1Params()
     negative_control_path: Optional[str] = None
     manual_background_value: Optional[float] = None
     outlier_threshold: float = 3.5
+    use_gpu: bool = True
 
 
 class QuantificationResultRow(BaseModel):

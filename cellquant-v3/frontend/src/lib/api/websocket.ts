@@ -6,10 +6,12 @@
 import type { ProgressMessage } from './types';
 
 type MessageHandler = (msg: ProgressMessage) => void;
+type ExhaustedHandler = () => void;
 
 export class ProgressSocket {
 	private ws: WebSocket | null = null;
 	private handlers = new Set<MessageHandler>();
+	private exhaustedHandlers = new Set<ExhaustedHandler>();
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private sessionId: string;
 	private maxRetries = 5;
@@ -48,12 +50,18 @@ export class ProgressSocket {
 					this.retryCount++;
 					this.connect();
 				}, delay);
+			} else {
+				this.exhaustedHandlers.forEach((h) => h());
 			}
 		};
 
 		this.ws.onerror = () => {
 			this.ws?.close();
 		};
+	}
+
+	onExhausted(handler: ExhaustedHandler): void {
+		this.exhaustedHandlers.add(handler);
 	}
 
 	onMessage(handler: MessageHandler): () => void {

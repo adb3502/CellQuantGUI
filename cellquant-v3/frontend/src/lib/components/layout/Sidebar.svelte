@@ -11,14 +11,35 @@
 		ScrollText,
 		Brain,
 		Layers,
+		Film,
+		Droplet,
+		Shield,
 		PanelLeftClose,
 		PanelLeftOpen
 	} from 'lucide-svelte';
+	import { isAdmin } from '$stores/auth';
+	import { healthCheck } from '$lib/api/client';
+	import { onMount } from 'svelte';
+
+	// Read the version from the backend rather than hardcoding it here: a
+	// literal in this file silently drifted from pyproject.toml and showed a
+	// stale version after a deploy. Falls back if the call fails.
+	let version = $state('3.1.0');
+	onMount(async () => {
+		try {
+			const h = await healthCheck();
+			if (h?.version) version = h.version;
+		} catch {
+			// keep fallback
+		}
+	});
 
 	const navItems = [
 		{ href: '/experiment', label: 'Experiment', icon: FlaskConical },
 		{ href: '/segmentation', label: 'Analysis', icon: Microscope },
 		{ href: '/tracking', label: 'Tracking', icon: Route },
+		{ href: '/video', label: 'Video', icon: Film },
+		{ href: '/sabetagal', label: 'SA-β-gal', icon: Droplet },
 		{ href: '/editor', label: 'Mask Editor', icon: PenTool },
 		{ href: '/training', label: 'Training', icon: Brain },
 		{ href: '/quantification', label: 'Quantification', icon: Calculator },
@@ -76,9 +97,25 @@
 		{/each}
 	</ul>
 
+	{#if $isAdmin}
+		<div class="sidebar-admin">
+			<a
+				href="/admin"
+				class="sidebar-link"
+				class:active={currentPath.startsWith('/admin')}
+				title={collapsed ? 'Admin' : undefined}
+			>
+				<span class="sidebar-icon">
+					<Shield size={20} strokeWidth={currentPath.startsWith('/admin') ? 2.2 : 1.6} />
+				</span>
+				{#if !collapsed}<span class="sidebar-label font-ui">Admin</span>{/if}
+			</a>
+		</div>
+	{/if}
+
 	{#if !collapsed}
 		<div class="sidebar-footer font-mono">
-			v3.0.0
+			v{version}
 		</div>
 	{/if}
 </nav>
@@ -202,6 +239,12 @@
 		border-radius: 50%;
 		background: var(--accent);
 		margin-left: auto;
+	}
+
+	.sidebar-admin {
+		padding: 4px 8px;
+		border-top: 1px solid var(--border);
+		flex-shrink: 0;
 	}
 
 	.sidebar-footer {

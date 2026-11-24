@@ -134,6 +134,7 @@ async def get_status(task_id: str):
         message=task.message,
         elapsed_seconds=task.elapsed,
         result=task.result,
+        error=task.error,
     )
 
 

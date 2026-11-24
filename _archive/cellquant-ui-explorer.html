@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CellQuant Enterprise - Dual Theme Preview</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Libre+Baskerville:wght@400;700&family=Crimson+Text:wght@400;600&family=Inconsolata:wght@400;500&family=Lato:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            min-height: 100vh;
+        }
+
+        .controls {
+            background: #111;
+            border-right: 1px solid #222;
+            padding: 24px;
+            overflow-y: auto;
+        }
+
+        .controls h1 {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #888;
+            margin-bottom: 8px;
+        }
+
+        .controls .subtitle {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 24px;
+        }
+
+        .theme-toggle-demo {
+            background: #1a1a1a;
+            border: 2px solid #333;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .theme-toggle-demo h2 {
+            font-size: 13px;
+            color: #fff;
+            margin-bottom: 16px;
+        }
+
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            padding: 16px;
+            background: #111;
+            border-radius: 8px;
+        }
+
+        .toggle-label {
+            font-size: 12px;
+            color: #888;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .toggle-label.active { color: #F5A623; }
+
+        .toggle-label .icon { font-size: 16px; }
+
+        .theme-switch {
+            position: relative;
+            width: 56px;
+            height: 28px;
+            background: #333;
+            border-radius: 14px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .theme-switch.light { background: #6B5B95; }
+
+        .theme-switch .toggle-knob {
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 22px;
+            height: 22px;
+            background: #F5A623;
+            border-radius: 50%;
+            transition: transform 0.3s, background 0.3s;
+        }
+
+        .theme-switch.light .toggle-knob {
+            transform: translateX(28px);
+            background: #fff;
+        }
+
+        .section-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #666;
+            margin-bottom: 12px;
+            margin-top: 24px;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border-radius: 8px;
+            padding: 16px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #aaa;
+            margin-bottom: 16px;
+        }
+
+        .info-box .info-title { color: #fff; display: block; margin-bottom: 8px; font-weight: 600; }
+        .info-box.dark-info { border-left: 3px solid #F5A623; }
+        .info-box.light-info { border-left: 3px solid #6B5B95; }
+        .info-box ul { list-style: none; margin-top: 8px; }
+        .info-box li { padding: 4px 0; padding-left: 16px; position: relative; font-size: 12px; }
+        .info-box.dark-info li::before { content: "\2022"; position: absolute; left: 0; color: #F5A623; }
+        .info-box.light-info li::before { content: "\2022"; position: absolute; left: 0; color: #6B5B95; }
+
+        .preview-area {
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .preview-container {
+            flex: 1;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+            min-height: 700px;
+        }
+
+        .prompt-output {
+            margin-top: 24px;
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .prompt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .prompt-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: #666; }
+
+        .copy-btn {
+            background: #F5A623;
+            color: #000;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .copy-btn:hover { background: #ffb83d; }
+        .copy-btn.copied { background: #7CB342; }
+
+        .prompt-text {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            color: #ccc;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        /* Shared styles */
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .form-group { margin-bottom: 20px; }
+        .form-label { display: block; margin-bottom: 8px; font-weight: 500; }
+        .form-input, .form-select { width: 100%; padding: 10px 12px; border-radius: 4px; font-size: 14px; }
+        .btn { padding: 12px 24px; border-radius: 6px; font-weight: 600; cursor: pointer; border: none; font-size: 14px; transition: all 0.2s; }
+        .btn-row { display: flex; gap: 12px; margin-top: 20px; }
+        .progress-bar { height: 8px; border-radius: 4px; overflow: hidden; margin: 16px 0; }
+        .progress-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+        .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        .image-placeholder { aspect-ratio: 4/3; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; flex-direction: column; gap: 4px; }
+        .file-list { margin: 16px 0; }
+        .file-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 6px; margin-bottom: 8px; }
+        .file-icon { width: 32px; height: 32px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; }
+        .channel-toggles { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
+        .channel-toggle { padding: 6px 14px; border-radius: 16px; font-size: 12px; font-weight: 600; cursor: pointer; border: 2px solid; transition: all 0.2s; }
+
+        /* ═══════════════════════════════════════════════════════════
+           DEEP FOCUS (DARK MODE)
+           ═══════════════════════════════════════════════════════════ */
+        .theme-deep-focus {
+            --bg: #0D0D0D;
+            --bg-elevated: #1A1A1A;
+            --bg-hover: #252525;
+            --text: #E8E8E8;
+            --text-muted: #888888;
+            --accent: #F5A623;
+            --accent-soft: rgba(245, 166, 35, 0.15);
+            --blue: #5B8DEF;
+            --green: #7CB342;
+            --red: #EF5350;
+            --border: #2a2a2a;
+
+            background: var(--bg);
+            font-family: 'Outfit', sans-serif;
+            color: var(--text);
+            min-height: 700px;
+            transition: background 0.3s, color 0.3s;
+        }
+
+        .theme-deep-focus .app-header {
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            padding: 20px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .theme-deep-focus .app-title { font-size: 20px; font-weight: 500; letter-spacing: -0.01em; }
+        .theme-deep-focus .app-subtitle { font-size: 12px; color: var(--text-muted); font-weight: 300; margin-top: 2px; }
+
+        .theme-deep-focus .header-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--bg-elevated);
+            padding: 6px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .theme-deep-focus .header-toggle:hover { border-color: var(--accent); }
+
+        .theme-deep-focus .header-toggle .icon { font-size: 14px; }
+        .theme-deep-focus .header-toggle .label { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+
+        .theme-deep-focus .tab-nav {
+            display: flex;
+            padding: 0 32px;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .theme-deep-focus .tab-item {
+            padding: 14px 20px;
+            font-size: 13px;
+            color: var(--text-muted);
+            border: none;
+            background: none;
+            cursor: pointer;
+            position: relative;
+            font-family: 'Outfit', sans-serif;
+            transition: color 0.15s;
+        }
+
+        .theme-deep-focus .tab-item:hover { color: var(--text); }
+        .theme-deep-focus .tab-item.active { color: var(--accent); }
+        .theme-deep-focus .tab-item.active::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 20px;
+            right: 20px;
+            height: 2px;
+            background: var(--accent);
+            border-radius: 2px 2px 0 0;
+        }
+
+        .theme-deep-focus .content { padding: 32px; }
+
+        .theme-deep-focus .section-header {
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 20px;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .theme-deep-focus .section-header::before {
+            content: '';
+            width: 3px;
+            height: 14px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        .theme-deep-focus .form-input, .theme-deep-focus .form-select {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+        .theme-deep-focus .form-input:focus { border-color: var(--accent); outline: none; }
+        .theme-deep-focus .form-label { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+        .theme-deep-focus .btn-primary { background: var(--accent); color: #000; }
+        .theme-deep-focus .btn-primary:hover { background: #ffb83d; }
+        .theme-deep-focus .btn-secondary { background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text); }
+        .theme-deep-focus .btn-secondary:hover { border-color: var(--accent); }
+
+        .theme-deep-focus .progress-bar { background: var(--border); }
+        .theme-deep-focus .progress-fill { background: var(--accent); width: 65%; }
+
+        .theme-deep-focus .image-placeholder {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+        }
+
+        .theme-deep-focus .file-item { background: var(--bg-elevated); border: 1px solid var(--border); }
+        .theme-deep-focus .file-item:hover { border-color: var(--accent); }
+        .theme-deep-focus .file-icon { background: var(--accent-soft); color: var(--accent); }
+
+        .theme-deep-focus .channel-toggle {
+            background: var(--bg-elevated);
+            border-color: var(--border);
+            color: var(--text-muted);
+        }
+        .theme-deep-focus .channel-toggle:hover { border-color: var(--text-muted); }
+        .theme-deep-focus .channel-toggle.active { background: var(--accent); border-color: var(--accent); color: #000; }
+
+        .theme-deep-focus .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1px;
+            background: var(--border);
+            margin-bottom: 32px;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .theme-deep-focus .stat-card { background: var(--bg-elevated); padding: 20px; transition: background 0.2s; }
+        .theme-deep-focus .stat-card:hover { background: var(--bg-hover); }
+
+        .theme-deep-focus .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 26px;
+            font-weight: 500;
+            color: var(--text);
+        }
+
+        .theme-deep-focus .stat-label { font-size: 11px; color: var(--text-muted); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.03em; }
+
+        .theme-deep-focus .data-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 32px; }
+
+        .theme-deep-focus .data-table th {
+            text-align: left;
+            padding: 10px 14px;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            font-weight: 500;
+            color: var(--text-muted);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .theme-deep-focus .data-table td {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+        }
+
+        .theme-deep-focus .data-table tr:hover td { background: var(--bg-hover); }
+
+        .theme-deep-focus .chart-area {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            height: 180px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        .theme-deep-focus .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        .theme-deep-focus .status-badge.success { background: rgba(124, 179, 66, 0.2); color: var(--green); }
+        .theme-deep-focus .status-badge.pending { background: var(--accent-soft); color: var(--accent); }
+
+        /* ═══════════════════════════════════════════════════════════
+           HISTOLOGY ATLAS (LIGHT MODE)
+           ═══════════════════════════════════════════════════════════ */
+        .theme-histology-atlas {
+            --bg: #F9F6F0;
+            --bg-elevated: #FFFEFA;
+            --bg-hover: #F0EDE5;
+            --text: #2C3E50;
+            --text-muted: #7F8C8D;
+            --hematoxylin: #6B5B95;
+            --hematoxylin-soft: rgba(107, 91, 149, 0.12);
+            --eosin: #D4A5A5;
+            --teal: #45B7AA;
+            --border: #E8E2D9;
+
+            background: var(--bg);
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+            font-family: 'Crimson Text', Georgia, serif;
+            color: var(--text);
+            min-height: 700px;
+            transition: background 0.3s, color 0.3s;
+        }
+
+        .theme-histology-atlas .app-header {
+            background: linear-gradient(180deg, var(--bg-elevated) 0%, var(--bg) 100%);
+            border-bottom: 2px solid var(--hematoxylin);
+            padding: 20px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .theme-histology-atlas .app-title {
+            font-family: 'Libre Baskerville', serif;
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--hematoxylin);
+            letter-spacing: -0.01em;
+        }
+
+        .theme-histology-atlas .app-subtitle { font-size: 13px; color: var(--text-muted); font-style: italic; margin-top: 2px; }
+
+        .theme-histology-atlas .header-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--bg-elevated);
+            padding: 6px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Lato', sans-serif;
+        }
+
+        .theme-histology-atlas .header-toggle:hover { border-color: var(--hematoxylin); }
+
+        .theme-histology-atlas .header-toggle .icon { font-size: 14px; }
+        .theme-histology-atlas .header-toggle .label { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+
+        .theme-histology-atlas .tab-nav {
+            display: flex;
+            padding: 0 32px;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .theme-histology-atlas .tab-item {
+            padding: 14px 24px;
+            font-size: 14px;
+            color: var(--text-muted);
+            border: none;
+            background: none;
+            cursor: pointer;
+            position: relative;
+            font-family: 'Lato', sans-serif;
+            transition: all 0.2s;
+        }
+
+        .theme-histology-atlas .tab-item:hover { color: var(--hematoxylin); }
+        .theme-histology-atlas .tab-item.active { color: var(--hematoxylin); font-weight: 700; }
+        .theme-histology-atlas .tab-item.active::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 12px;
+            right: 12px;
+            height: 3px;
+            background: linear-gradient(90deg, var(--hematoxylin), var(--eosin));
+            border-radius: 3px 3px 0 0;
+        }
+
+        .theme-histology-atlas .content { padding: 32px; }
+
+        .theme-histology-atlas .section-header {
+            font-family: 'Libre Baskerville', serif;
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 20px;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .theme-histology-atlas .section-header::before {
+            content: '\00A7';
+            color: var(--teal);
+            font-size: 20px;
+        }
+
+        .theme-histology-atlas .form-input, .theme-histology-atlas .form-select {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-family: 'Lato', sans-serif;
+        }
+        .theme-histology-atlas .form-input:focus { border-color: var(--hematoxylin); outline: none; box-shadow: 0 0 0 3px var(--hematoxylin-soft); }
+        .theme-histology-atlas .form-label { color: var(--text); font-family: 'Lato', sans-serif; font-size: 13px; }
+
+        .theme-histology-atlas .btn-primary { background: var(--hematoxylin); color: white; font-family: 'Lato', sans-serif; }
+        .theme-histology-atlas .btn-primary:hover { background: #5a4a84; }
+        .theme-histology-atlas .btn-secondary { background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text); font-family: 'Lato', sans-serif; }
+        .theme-histology-atlas .btn-secondary:hover { border-color: var(--hematoxylin); }
+
+        .theme-histology-atlas .progress-bar { background: var(--border); }
+        .theme-histology-atlas .progress-fill { background: linear-gradient(90deg, var(--hematoxylin), var(--teal)); width: 65%; }
+
+        .theme-histology-atlas .image-placeholder {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            font-style: italic;
+            box-shadow: 3px 3px 0 var(--eosin);
+        }
+
+        .theme-histology-atlas .file-item { background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: 2px 2px 0 var(--eosin); }
+        .theme-histology-atlas .file-item:hover { border-color: var(--hematoxylin); }
+        .theme-histology-atlas .file-icon { background: var(--hematoxylin); color: white; }
+
+        .theme-histology-atlas .channel-toggle {
+            background: var(--bg-elevated);
+            border-color: var(--border);
+            color: var(--text-muted);
+            font-family: 'Lato', sans-serif;
+        }
+        .theme-histology-atlas .channel-toggle:hover { border-color: var(--hematoxylin); }
+        .theme-histology-atlas .channel-toggle.active { background: var(--hematoxylin); border-color: var(--hematoxylin); color: white; }
+
+        .theme-histology-atlas .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .theme-histology-atlas .stat-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 20px;
+            box-shadow: 3px 3px 0 var(--eosin);
+            transition: transform 0.2s;
+        }
+
+        .theme-histology-atlas .stat-card:hover { transform: translate(-1px, -1px); }
+
+        .theme-histology-atlas .stat-value {
+            font-family: 'Inconsolata', monospace;
+            font-size: 28px;
+            font-weight: 500;
+            color: var(--hematoxylin);
+        }
+
+        .theme-histology-atlas .stat-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            font-family: 'Lato', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .theme-histology-atlas .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            margin-bottom: 32px;
+            border: 1px solid var(--border);
+            background: var(--bg-elevated);
+            box-shadow: 3px 3px 0 var(--eosin);
+        }
+
+        .theme-histology-atlas .data-table th {
+            text-align: left;
+            padding: 12px 14px;
+            background: linear-gradient(180deg, var(--hematoxylin) 0%, #5a4a84 100%);
+            color: white;
+            font-family: 'Lato', sans-serif;
+            font-weight: 700;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .theme-histology-atlas .data-table td {
+            padding: 11px 14px;
+            border-bottom: 1px solid var(--border);
+            font-family: 'Inconsolata', monospace;
+            font-size: 13px;
+        }
+
+        .theme-histology-atlas .data-table tr:nth-child(even) { background: rgba(212, 165, 165, 0.08); }
+        .theme-histology-atlas .data-table tr:hover { background: rgba(69, 183, 170, 0.1); }
+
+        .theme-histology-atlas .chart-area {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            height: 180px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-style: italic;
+            box-shadow: 3px 3px 0 var(--eosin);
+            font-size: 13px;
+        }
+
+        .theme-histology-atlas .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 600;
+            font-family: 'Lato', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        .theme-histology-atlas .status-badge.success { background: rgba(69, 183, 170, 0.2); color: #2d8a7f; }
+        .theme-histology-atlas .status-badge.pending { background: var(--hematoxylin-soft); color: var(--hematoxylin); }
+    </style>
+</head>
+<body>
+    <div class="layout">
+        <div class="controls">
+            <h1>CellQuant Themes</h1>
+            <div class="subtitle">Dark/Light Mode Toggle</div>
+
+            <div class="theme-toggle-demo">
+                <h2>Theme Toggle</h2>
+                <div class="toggle-container">
+                    <span class="toggle-label active" id="dark-label">
+                        <span class="icon">&#9790;</span> Dark
+                    </span>
+                    <div class="theme-switch" id="theme-switch">
+                        <div class="toggle-knob"></div>
+                    </div>
+                    <span class="toggle-label" id="light-label">
+                        <span class="icon">&#9788;</span> Light
+                    </span>
+                </div>
+            </div>
+
+            <div class="section-title">Dark Mode</div>
+            <div class="info-box dark-info">
+                <span class="info-title">Deep Focus</span>
+                Minimal darkroom style for extended sessions
+                <ul>
+                    <li>True black (#0D0D0D)</li>
+                    <li>Warm amber accent (#F5A623)</li>
+                    <li>Outfit + JetBrains Mono</li>
+                    <li>Single-pixel borders</li>
+                </ul>
+            </div>
+
+            <div class="section-title">Light Mode</div>
+            <div class="info-box light-info">
+                <span class="info-title">Histology Atlas</span>
+                Warm scientific illustration style
+                <ul>
+                    <li>Parchment (#F9F6F0)</li>
+                    <li>H&E stain colors</li>
+                    <li>Libre Baskerville + Crimson</li>
+                    <li>Eosin pink shadows</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="preview-area">
+            <div class="preview-container" id="preview"></div>
+
+            <div class="prompt-output">
+                <div class="prompt-header">
+                    <span class="prompt-label">Implementation Prompt</span>
+                    <button class="copy-btn" id="copy-btn">Copy</button>
+                </div>
+                <div class="prompt-text" id="prompt-text"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var state = { isDark: true, tab: 'results' };
+
+        var tabNames = {
+            load: 'Load Images',
+            segment: 'Segmentation',
+            roi: 'ROI Editor',
+            quant: 'Quantification',
+            results: 'Results'
+        };
+
+        var tabContent = {
+            load: function() {
+                return '<div class="section-header">Load Experiment Folder</div>' +
+                    '<div class="two-column">' +
+                    '<div>' +
+                    '<div class="form-group"><label class="form-label">Experiment Folder</label><input type="text" class="form-input" value="C:/Data/Experiment_001" readonly></div>' +
+                    '<div class="btn-row"><button class="btn btn-primary">Browse Folder</button><button class="btn btn-secondary">Scan</button></div>' +
+                    '<div class="file-list">' +
+                    '<div class="file-item"><div class="file-icon">C0</div><div><strong>Control</strong><br><span style="font-size:11px;opacity:0.6">24 images</span></div><span class="status-badge success">Ready</span></div>' +
+                    '<div class="file-item"><div class="file-icon">T1</div><div><strong>Treatment A</strong><br><span style="font-size:11px;opacity:0.6">24 images</span></div><span class="status-badge success">Ready</span></div>' +
+                    '<div class="file-item"><div class="file-icon">T2</div><div><strong>Treatment B</strong><br><span style="font-size:11px;opacity:0.6">24 images</span></div><span class="status-badge pending">Pending</span></div>' +
+                    '</div></div>' +
+                    '<div>' +
+                    '<div class="section-header">Channel Configuration</div>' +
+                    '<div class="form-group"><label class="form-label">Nuclear Channel (DAPI)</label><input type="text" class="form-input" value="C0"></div>' +
+                    '<div class="form-group"><label class="form-label">Cytoplasm Channel</label><input type="text" class="form-input" value="C1"></div>' +
+                    '<div class="form-group"><label class="form-label">Marker Channels</label><input type="text" class="form-input" value="C2, C3, C4"></div>' +
+                    '</div></div>';
+            },
+            segment: function() {
+                return '<div class="section-header">Segmentation Settings</div>' +
+                    '<div class="two-column">' +
+                    '<div>' +
+                    '<div class="form-group"><label class="form-label">Model</label><select class="form-select"><option>Cellpose - cyto2</option><option>Cellpose - nuclei</option></select></div>' +
+                    '<div class="form-group"><label class="form-label">Cell Diameter (px)</label><input type="number" class="form-input" value="30"></div>' +
+                    '<div class="form-group"><label class="form-label">Flow Threshold</label><input type="number" class="form-input" value="0.4" step="0.1"></div>' +
+                    '<div class="btn-row"><button class="btn btn-primary">Run Segmentation</button><button class="btn btn-secondary">Load Masks</button></div>' +
+                    '<div class="progress-bar"><div class="progress-fill"></div></div>' +
+                    '<div style="font-size:12px;opacity:0.6">Processing: 45 of 72 images (65%)</div>' +
+                    '</div>' +
+                    '<div>' +
+                    '<div class="section-header">Preview</div>' +
+                    '<div class="image-placeholder">Segmentation Preview<span style="font-size:11px;opacity:0.5">Select an image</span></div>' +
+                    '<div class="channel-toggles"><button class="channel-toggle active">DAPI</button><button class="channel-toggle">Cyto</button><button class="channel-toggle active">Masks</button></div>' +
+                    '</div></div>';
+            },
+            roi: function() {
+                return '<div class="section-header">ROI Editor</div>' +
+                    '<div class="two-column">' +
+                    '<div>' +
+                    '<div class="form-group"><label class="form-label">Select Image</label><select class="form-select"><option>Control_001.tif</option><option>Control_002.tif</option></select></div>' +
+                    '<div class="image-placeholder" style="aspect-ratio:1">Image + Mask Overlay<span style="font-size:11px;opacity:0.5">2,847 cells detected</span></div>' +
+                    '<div class="channel-toggles"><button class="channel-toggle active">DAPI</button><button class="channel-toggle">GFP</button><button class="channel-toggle active">Masks</button></div>' +
+                    '</div>' +
+                    '<div>' +
+                    '<div class="section-header">Edit Tools</div>' +
+                    '<div class="btn-row" style="flex-wrap:wrap"><button class="btn btn-secondary">Add Cell</button><button class="btn btn-secondary">Remove</button><button class="btn btn-secondary">Merge</button><button class="btn btn-secondary">Split</button></div>' +
+                    '<div style="margin-top:24px"><button class="btn btn-primary" style="width:100%">Open in Napari</button></div>' +
+                    '<div style="font-size:11px;opacity:0.5;margin-top:8px;text-align:center">Full editor with paint/erase tools</div>' +
+                    '<div class="section-header" style="margin-top:28px">Recent Edits</div>' +
+                    '<div class="file-list">' +
+                    '<div class="file-item"><div class="file-icon">+</div><div><strong>Added #2848</strong><span style="font-size:10px;opacity:0.5;display:block">Control_001.tif</span></div></div>' +
+                    '<div class="file-item"><div class="file-icon">-</div><div><strong>Removed #1204</strong><span style="font-size:10px;opacity:0.5;display:block">Control_001.tif</span></div></div>' +
+                    '</div></div></div>';
+            },
+            quant: function() {
+                return '<div class="section-header">Quantification Settings</div>' +
+                    '<div class="two-column">' +
+                    '<div>' +
+                    '<div class="form-group"><label class="form-label">Background Method</label><select class="form-select"><option>Rolling Ball (50px)</option><option>Percentile (5%)</option></select></div>' +
+                    '<div class="form-group"><label class="form-label">Markers to Quantify</label>' +
+                    '<div class="channel-toggles"><button class="channel-toggle active">DAPI</button><button class="channel-toggle active">GFP</button><button class="channel-toggle active">mCherry</button><button class="channel-toggle">BFP</button></div></div>' +
+                    '<div class="form-group"><label class="form-label">Min Cell Area (px)</label><input type="number" class="form-input" value="100"></div>' +
+                    '<div class="btn-row"><button class="btn btn-primary">Run Quantification</button><button class="btn btn-secondary">Cancel</button></div>' +
+                    '</div>' +
+                    '<div>' +
+                    '<div class="section-header">Progress</div>' +
+                    '<div class="stats-grid" style="grid-template-columns: 1fr 1fr">' +
+                    '<div class="stat-card"><div class="stat-value">72</div><div class="stat-label">Images</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">2,847</div><div class="stat-label">Cells</div></div>' +
+                    '</div>' +
+                    '<div class="progress-bar"><div class="progress-fill"></div></div>' +
+                    '<div style="font-size:12px;opacity:0.6">Calculating CTCF...</div>' +
+                    '</div></div>';
+            },
+            results: function() {
+                return '<div class="section-header">Analysis Summary</div>' +
+                    '<div class="stats-grid">' +
+                    '<div class="stat-card"><div class="stat-value">2,847</div><div class="stat-label">Cells Analyzed</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">12</div><div class="stat-label">Conditions</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">4</div><div class="stat-label">Markers</div></div>' +
+                    '<div class="stat-card"><div class="stat-value">98.2%</div><div class="stat-label">Confidence</div></div>' +
+                    '</div>' +
+                    '<div class="section-header">CTCF Results</div>' +
+                    '<table class="data-table"><thead><tr><th>Cell ID</th><th>Condition</th><th>Area</th><th>DAPI</th><th>GFP</th><th>mCherry</th></tr></thead>' +
+                    '<tbody>' +
+                    '<tr><td>CTRL_001_0001</td><td>Control</td><td>1,247</td><td>45,892</td><td>12,456</td><td>8,234</td></tr>' +
+                    '<tr><td>CTRL_001_0002</td><td>Control</td><td>1,089</td><td>42,156</td><td>11,892</td><td>7,845</td></tr>' +
+                    '<tr><td>TREAT_001_0001</td><td>Treatment A</td><td>1,456</td><td>48,234</td><td>28,456</td><td>15,678</td></tr>' +
+                    '<tr><td>TREAT_001_0002</td><td>Treatment A</td><td>1,312</td><td>46,789</td><td>26,123</td><td>14,234</td></tr>' +
+                    '</tbody></table>' +
+                    '<div class="btn-row"><button class="btn btn-primary">Export CSV</button><button class="btn btn-secondary">Export Excel</button><button class="btn btn-secondary">Export ROIs</button></div>' +
+                    '<div class="section-header" style="margin-top:28px">CTCF Distribution</div>' +
+                    '<div class="chart-area">[ Box Plot: CTCF by Condition ]</div>';
+            }
+        };
+
+        var fullPrompt = 'Implement a dual-theme CellQuant Enterprise Gradio app with Dark/Light mode toggle:\n\n' +
+            '## DARK MODE: "Deep Focus"\n' +
+            '- Background: #0D0D0D (true black), elevated surfaces #1A1A1A\n' +
+            '- Accent: #F5A623 (warm amber) - NOT cold neon\n' +
+            '- Typography: Outfit for UI, JetBrains Mono for data\n' +
+            '- Borders: 1px solid #2a2a2a (barely visible)\n' +
+            '- Stats grid: 1px gap between cards\n' +
+            '- Section headers: 3px amber bar before text\n' +
+            '- Buttons: Primary = amber bg, Secondary = dark bg with border\n' +
+            '- Hover states: subtle background lighten to #252525\n' +
+            '- Status badges: semi-transparent backgrounds\n' +
+            '- Minimal, focused, quiet interface\n\n' +
+            '## LIGHT MODE: "Histology Atlas"\n' +
+            '- Background: #F9F6F0 (warm parchment) with subtle paper texture\n' +
+            '- Primary accent: #6B5B95 (hematoxylin purple)\n' +
+            '- Secondary accent: #D4A5A5 (eosin pink) for shadows/highlights\n' +
+            '- Tertiary: #45B7AA (teal) for success states\n' +
+            '- Typography: Libre Baskerville for headings, Crimson Text for body, Inconsolata for data, Lato for UI labels\n' +
+            '- Cards: 3px eosin pink drop shadow (box-shadow: 3px 3px 0 #D4A5A5)\n' +
+            '- Section headers: Section symbol prefix in teal\n' +
+            '- Table headers: Purple gradient background\n' +
+            '- Tab underline: Purple-to-pink gradient\n' +
+            '- Alternating table rows with subtle eosin tint\n' +
+            '- Warm, scholarly, human-crafted feel\n\n' +
+            '## TOGGLE IMPLEMENTATION\n' +
+            '- Add toggle button in header (right side)\n' +
+            '- Dark mode: moon icon, Light mode: sun icon\n' +
+            '- Use CSS variables for all colors\n' +
+            '- Smooth 300ms transition on theme change\n' +
+            '- Persist preference in localStorage\n' +
+            '- Default to system preference (prefers-color-scheme)\n\n' +
+            '## SHARED ELEMENTS\n' +
+            '- Same layout structure for both themes\n' +
+            '- 5 tabs: Load Images, Segmentation, ROI Editor, Quantification, Results\n' +
+            '- Consistent spacing and component sizes\n' +
+            '- Progress bars, status badges, channel toggles, data tables\n' +
+            '- Napari integration button in ROI Editor\n\n' +
+            '## CSS VARIABLE STRUCTURE\n' +
+            ':root {\n' +
+            '  --bg: #F9F6F0;\n' +
+            '  --bg-elevated: #FFFEFA;\n' +
+            '  --text: #2C3E50;\n' +
+            '  --text-muted: #7F8C8D;\n' +
+            '  --accent: #6B5B95;\n' +
+            '  --accent-secondary: #D4A5A5;\n' +
+            '  --success: #45B7AA;\n' +
+            '  --border: #E8E2D9;\n' +
+            '}\n\n' +
+            '[data-theme="dark"] {\n' +
+            '  --bg: #0D0D0D;\n' +
+            '  --bg-elevated: #1A1A1A;\n' +
+            '  --text: #E8E8E8;\n' +
+            '  --text-muted: #888888;\n' +
+            '  --accent: #F5A623;\n' +
+            '  --accent-secondary: rgba(245, 166, 35, 0.15);\n' +
+            '  --success: #7CB342;\n' +
+            '  --border: #2a2a2a;\n' +
+            '}';
+
+        function renderPreview() {
+            var preview = document.getElementById('preview');
+            var themeClass = state.isDark ? 'theme-deep-focus' : 'theme-histology-atlas';
+            var toggleIcon = state.isDark ? '&#9788;' : '&#9790;';
+            var toggleLabel = state.isDark ? 'Light' : 'Dark';
+
+            var tabs = ['load', 'segment', 'roi', 'quant', 'results'];
+            var tabsHtml = '';
+            for (var i = 0; i < tabs.length; i++) {
+                var t = tabs[i];
+                var activeClass = state.tab === t ? ' active' : '';
+                tabsHtml += '<button class="tab-item' + activeClass + '" data-tab="' + t + '">' + tabNames[t] + '</button>';
+            }
+
+            var contentHtml = tabContent[state.tab]();
+
+            var html = '<div class="' + themeClass + '">' +
+                '<div class="app-header">' +
+                '<div><div class="app-title">CellQuant Enterprise</div>' +
+                '<div class="app-subtitle">High-throughput Cell Quantification</div></div>' +
+                '<div class="header-toggle" id="header-toggle">' +
+                '<span class="icon">' + toggleIcon + '</span>' +
+                '<span class="label">' + toggleLabel + ' Mode</span>' +
+                '</div></div>' +
+                '<div class="tab-nav">' + tabsHtml + '</div>' +
+                '<div class="content">' + contentHtml + '</div></div>';
+
+            preview.innerHTML = html;
+
+            // Attach event listeners
+            var tabItems = preview.querySelectorAll('.tab-item');
+            for (var j = 0; j < tabItems.length; j++) {
+                tabItems[j].addEventListener('click', function() {
+                    state.tab = this.getAttribute('data-tab');
+                    renderPreview();
+                });
+            }
+
+            var headerToggle = document.getElementById('header-toggle');
+            if (headerToggle) {
+                headerToggle.addEventListener('click', function() {
+                    state.isDark = !state.isDark;
+                    updateToggleUI();
+                    renderPreview();
+                });
+            }
+        }
+
+        function updateToggleUI() {
+            var switchEl = document.getElementById('theme-switch');
+            var darkLabel = document.getElementById('dark-label');
+            var lightLabel = document.getElementById('light-label');
+
+            if (state.isDark) {
+                switchEl.classList.remove('light');
+                darkLabel.classList.add('active');
+                lightLabel.classList.remove('active');
+            } else {
+                switchEl.classList.add('light');
+                darkLabel.classList.remove('active');
+                lightLabel.classList.add('active');
+            }
+        }
+
+        function updatePrompt() {
+            document.getElementById('prompt-text').textContent = fullPrompt;
+        }
+
+        function updateAll() {
+            renderPreview();
+            updateToggleUI();
+            updatePrompt();
+        }
+
+        // Toggle switch in sidebar
+        document.getElementById('theme-switch').addEventListener('click', function() {
+            state.isDark = !state.isDark;
+            updateAll();
+        });
+
+        // Copy button
+        document.getElementById('copy-btn').addEventListener('click', function() {
+            var text = document.getElementById('prompt-text').textContent;
+            navigator.clipboard.writeText(text);
+            var btn = document.getElementById('copy-btn');
+            btn.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(function() {
+                btn.textContent = 'Copy';
+                btn.classList.remove('copied');
+            }, 2000);
+        });
+
+        updateAll();
+    </script>
+</body>
+</html>
