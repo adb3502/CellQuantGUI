@@ -128,3 +128,73 @@ class TestBuildProjection:
 
         for m in ("max", "mean", "std", "percentile"):
             assert build_projection(np.zeros((10, 8, 6)), m).shape == (8, 6)
+
+
+class TestEngineReuse:
+    """Loading Cellpose is the slow part of a run; load it once, not per video."""
+
+    def _session(self, tmp_path, n_videos):
+        import tifffile
+        from cellquant.sessions.models import Session
+
+        sets = {}
+        for i in range(n_videos):
+            p = tmp_path / f"v{i}.tif"
+            stack = np.full((6, 16, 16), 100, np.uint16)
+            stack[:, 4:8, 4:8] = 400
+            tifffile.imwrite(p, stack)
+            sets[f"v{i}"] = {"C0": str(p)}
+        s = Session(id="t", directory=tmp_path / "sess")
+        s.conditions = {"A": {"image_sets": sets}}
+        return s
+
+    def test_one_engine_for_many_videos(self, tmp_path, monkeypatch):
+        import cellquant.core.segmentation.cellpose_engine as ce
+        from cellquant.tasks.queue import TaskInfo
+        from cellquant.tasks.worker import run_video_task
+
+        created = []
+
+        class FakeEngine:
+            def __init__(self, *a, **kw):
+                created.append(kw)
+
+            def segment_single(self, img, **kw):
+                m = np.zeros(img.shape, np.int32)
+                m[4:8, 4:8] = 1
+
+                class R:
+                    masks = m
+                    n_cells = 1
+                return R()
+
+        monkeypatch.setattr(ce, "CellposeEngine", FakeEngine)
+
+        class Q:
+            def update_progress(self, *a, **k):
+                pass
+
+        s = self._session(tmp_path, 3)
+        out = run_video_task(TaskInfo(id="x", session_id="t", task_type="video"),
+                             Q(), s, {"mode": "static_roi"})
+        assert out["videos_processed"] == 3
+        assert len(created) == 1, f"engine built {len(created)} times for 3 videos"
+
+    def test_whole_field_builds_no_engine(self, tmp_path, monkeypatch):
+        import cellquant.core.segmentation.cellpose_engine as ce
+        from cellquant.tasks.queue import TaskInfo
+        from cellquant.tasks.worker import run_video_task
+
+        def boom(*a, **k):
+            raise AssertionError("whole_field must not load Cellpose")
+
+        monkeypatch.setattr(ce, "CellposeEngine", boom)
+
+        class Q:
+            def update_progress(self, *a, **k):
+                pass
+
+        s = self._session(tmp_path, 2)
+        out = run_video_task(TaskInfo(id="x", session_id="t", task_type="video"),
+                             Q(), s, {"mode": "whole_field"})
+        assert out["videos_processed"] == 2

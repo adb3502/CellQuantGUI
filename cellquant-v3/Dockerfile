@@ -51,6 +51,11 @@ RUN pip install --no-cache-dir "hatchling>=1.21" && \
 RUN mkdir -p /data && chown cellquant:cellquant /data
 VOLUME ["/data"]
 
+# Cellpose downloads its 1.15 GB model on first use into $HOME, which is
+# inside the container and lost on every rebuild. Keep it on the persistent
+# /data volume so a redeploy does not download it again.
+ENV CELLPOSE_LOCAL_MODELS_PATH=/data/cellpose_models
+
 USER cellquant
 
 EXPOSE 7860

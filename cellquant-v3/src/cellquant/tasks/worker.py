@@ -1080,6 +1080,7 @@ def run_video_task(task, queue, session, video_params: dict) -> dict:
                           stage="video", message="Starting video analysis")
 
     all_traces, all_summaries = [], []
+    engine = None
 
     for idx, (cond_name, base_name, path) in enumerate(targets):
         if task.status == "cancelled":
@@ -1100,8 +1101,12 @@ def run_video_task(task, queue, session, video_params: dict) -> dict:
         if mode == "whole_field":
             masks = np.ones(stack.shape[1:], dtype=np.int32)
         else:
-            from cellquant.core.segmentation.cellpose_engine import CellposeEngine
-            engine = CellposeEngine(model_type=video_params.get("model_type", "cpsam"))
+            # Build the model once per run, on first use. Loading Cellpose
+            # costs seconds; doing it per video multiplied that by every
+            # recording in the experiment.
+            if engine is None:
+                from cellquant.core.segmentation.cellpose_engine import CellposeEngine
+                engine = CellposeEngine(model_type=video_params.get("model_type", "cpsam"))
             result = engine.segment_single(
                 normalize_image(projection),
                 diameter=video_params.get("diameter", 30.0),
