@@ -20,6 +20,12 @@ class VideoRunRequest(BaseModel):
     event_refractory_frames: int = 5
     diameter: float = 30.0
     model_type: str = "cpsam"
+    # How the (T,Y,X) recording is collapsed before segmentation. "mean" was
+    # the original default and dilutes exactly the transient cells the
+    # analysis is looking for; measured on real dose-series data, max gives
+    # better foreground contrast and never lost a cell mean found.
+    projection: Literal["max", "percentile", "std", "mean"] = "max"
+    projection_percentile: float = 99.0
 
 
 class VideoRunResponse(BaseModel):

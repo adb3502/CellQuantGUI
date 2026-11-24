@@ -839,6 +839,8 @@ export interface VideoRunParams {
 	event_threshold_sigma?: number;
 	event_refractory_frames?: number;
 	diameter?: number;
+	projection?: 'max' | 'percentile' | 'std' | 'mean';
+	projection_percentile?: number;
 }
 
 export async function runVideo(
@@ -861,6 +863,66 @@ export async function getVideoTraces(sessionId: string, condition: string): Prom
 
 export async function parseDoses(sessionId: string): Promise<any> {
 	return request(`/video/parse-doses/${sessionId}`);
+}
+
+export interface VideoTraceMatrix {
+	frames: number[];
+	time_s: (number | null)[] | null;
+	cells: { cell_id: number; dff: (number | null)[] }[];
+	mean: (number | null)[];
+}
+
+export async function getVideoTraceMatrix(
+	sessionId: string, condition: string, baseName: string
+): Promise<VideoTraceMatrix> {
+	return request(`/video/trace-matrix/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}`);
+}
+
+export async function getVideoInfo(
+	sessionId: string, condition: string, baseName: string
+): Promise<{ n_frames: number; has_rois: boolean; n_cells: number }> {
+	return request(`/video/info/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}`);
+}
+
+export async function getVideoRoiSummary(
+	sessionId: string
+): Promise<{ rois: { condition: string; image_set: string; n_cells: number }[] }> {
+	return request(`/video/roi-summary/${sessionId}`);
+}
+
+// Plain URLs for <img src>, matching maskRenderUrl: images load without
+// going through request(), so the browser can cache and stream them.
+export function videoOverlayUrl(
+	sessionId: string, condition: string, baseName: string,
+	style: 'outline' | 'filled' = 'outline', bust = ''
+): string {
+	return `${BASE}/video/overlay/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}?style=${style}&v=${bust}`;
+}
+
+export interface PerVideoRow {
+	condition: string;
+	image_set: string;
+	n_cells: number;
+	n_responders: number;
+	pct_responders: number;
+	median_peak_dF_F0: number | null;
+	median_peak_frame: number | null;
+	median_auc: number | null;
+}
+
+export async function getVideoPerVideo(sessionId: string): Promise<{ videos: PerVideoRow[] }> {
+	return request(`/video/per-video/${sessionId}`);
+}
+
+export function videoExportUrl(sessionId: string, kind: 'summary' | 'traces'): string {
+	return `${BASE}/video/export/${sessionId}?kind=${kind}`;
+}
+
+export function videoFrameUrl(
+	sessionId: string, condition: string, baseName: string,
+	frame: number, overlay = true, bust = ''
+): string {
+	return `${BASE}/video/frame/${sessionId}/${encodeURIComponent(condition)}/${encodeURIComponent(baseName)}/${frame}?overlay=${overlay}&v=${bust}`;
 }
 
 // ---- SA-beta-gal analytics ----

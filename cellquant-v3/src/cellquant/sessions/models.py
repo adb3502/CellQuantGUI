@@ -45,6 +45,10 @@ class Session:
     # Video analytics
     traces_df: Optional[pd.DataFrame] = None
     trace_summary_df: Optional[pd.DataFrame] = None
+    # ROIs the video analysis segmented, kept separate from `masks` so a video
+    # run never overwrites a segmentation result for the same image set.
+    video_masks: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
+    video_projections: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
 
     # SA-beta-gal analytics
     sabetagal_df: Optional[pd.DataFrame] = None
@@ -74,6 +78,20 @@ class Session:
         p = self.directory / "masks" / condition
         p.mkdir(parents=True, exist_ok=True)
         return p / f"{base_name}_masks.npy"
+
+    def get_video_mask_path(self, condition: str, base_name: str) -> Path:
+        """ROIs from a video run. Distinct from get_mask_path so the two
+        analyses can coexist for the same image set."""
+        p = self.directory / "masks" / condition
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"{base_name}_video_masks.npy"
+
+    def get_video_projection_path(self, condition: str, base_name: str) -> Path:
+        """The projection the ROIs were segmented from - needed to render an
+        overlay the user can check."""
+        p = self.directory / "projections" / condition
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"{base_name}_projection.npy"
 
     def get_nuclear_mask_path(self, condition: str, base_name: str) -> Path:
         p = self.directory / "masks" / condition

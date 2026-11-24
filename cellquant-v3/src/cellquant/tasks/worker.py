@@ -930,6 +930,63 @@ def _estimate_frame_backgrounds(stack, masks):
     return out
 
 
+def build_projection(stack, mode: str = "max", percentile: float = 99.0):
+    """Collapse a (T, Y, X) recording to one 2-D image for segmentation.
+
+    The choice matters more than it looks. A MEAN projection was the original
+    default for SNR, but it works against the goal: a cell bright for 10 of
+    120 frames contributes 8% of its peak to the average, so exactly the
+    responding cells you care about are the ones it dilutes.
+
+    Measured on the Vasu IX83 dose series (13 recordings), foreground/
+    background contrast: mean 3.56, max 4.19, std 5.84 (medians). Max found
+    every cell mean found, plus one it missed.
+
+      max        - any cell that ever lit up. Good default.
+      percentile - max without the hot pixels and cosmic rays.
+      std        - pixels that CHANGED over time; the strongest discriminator,
+                   but a bright constant cell has std ~ 0 and disappears, which
+                   biases a dose series toward responders.
+      mean       - stable morphology, lowest noise, dilutes transients.
+    """
+    import numpy as np
+
+    stack = np.asarray(stack)
+    mode = (mode or "max").lower()
+    if mode == "mean":
+        return stack.mean(axis=0)
+    if mode == "std":
+        return stack.std(axis=0)
+    if mode == "percentile":
+        return np.percentile(stack, percentile, axis=0)
+    if mode == "max":
+        return stack.max(axis=0)
+    raise ValueError(
+        f"Unknown projection mode {mode!r}: "
+        "expected one of max, percentile, std, mean"
+    )
+
+
+def _persist_video_artifacts(session, condition, base_name, masks, projection):
+    """Keep the ROIs and the image they came from.
+
+    The video task used to segment, build traces, then discard the masks, so
+    there was no way to check which ROIs produced the numbers. Best-effort:
+    a failure to persist must never fail an analysis that already succeeded.
+    """
+    import numpy as np
+
+    try:
+        session.video_masks.setdefault(condition, {})[base_name] = masks
+        session.video_projections.setdefault(condition, {})[base_name] = projection
+        np.save(session.get_video_mask_path(condition, base_name), masks)
+        np.save(session.get_video_projection_path(condition, base_name),
+                np.asarray(projection, dtype=np.float32))
+    except Exception as exc:
+        print(f"[CellQuant] Warning: could not persist video artifacts "
+              f"for {condition}/{base_name}: {exc}")
+
+
 def _build_trace_tables(stack, masks, condition, image_set, config,
                         subtract_background=True):
     """Build the long traces table and the per-cell summary table."""
@@ -1035,10 +1092,14 @@ def run_video_task(task, queue, session, video_params: dict) -> dict:
         stack, meta = load_timelapse(path)
         stack = np.asarray(stack, dtype=np.float64)
 
+        proj_mode = video_params.get("projection", "max")
+        projection = build_projection(
+            stack, proj_mode, video_params.get("projection_percentile", 99.0)
+        )
+
         if mode == "whole_field":
             masks = np.ones(stack.shape[1:], dtype=np.int32)
         else:
-            projection = stack.mean(axis=0)
             from cellquant.core.segmentation.cellpose_engine import CellposeEngine
             engine = CellposeEngine(model_type=video_params.get("model_type", "cpsam"))
             result = engine.segment_single(
@@ -1046,7 +1107,12 @@ def run_video_task(task, queue, session, video_params: dict) -> dict:
                 diameter=video_params.get("diameter", 30.0),
             )
             masks = result.masks
-            print(f"{base_name}: segmented {result.n_cells} cells on projection")
+            print(f"{base_name}: segmented {result.n_cells} cells "
+                  f"on {proj_mode} projection")
+
+        # Keep the ROIs and the image they came from, so the user can SEE
+        # which cells produced the numbers.
+        _persist_video_artifacts(session, cond_name, base_name, masks, projection)
 
         traces_df, summary_df = _build_trace_tables(
             stack, masks, cond_name, base_name, config

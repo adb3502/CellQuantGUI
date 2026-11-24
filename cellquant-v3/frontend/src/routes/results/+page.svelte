@@ -5,6 +5,7 @@
 	import { sessionId } from '$stores/session';
 	import { resultsPage, quantSummary, qcSummary } from '$stores/quantification';
 	import ChartCard from '$components/charts/ChartCard.svelte';
+	import VideoResultsSection from '$lib/components/video/VideoResultsSection.svelte';
 	import {
 		type ChartType, COLOR_PALETTES, type PaletteId, getColor,
 		getChartTheme, baseLayout, computeKDE, removeOutliersIQR, computeKwPair,
@@ -643,6 +644,9 @@
 </script>
 
 <div class="page-results">
+	<!-- Video recordings, if any were analysed. Renders nothing otherwise. -->
+	<VideoResultsSection />
+
 	<!-- Summary Cards -->
 	{#if $quantSummary}
 		<div class="summary-row">
