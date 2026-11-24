@@ -1,0 +1,67 @@
+# CellQuant v3 — production compose
+# Required secrets (set in .env or export before running):
+#   JWT_SECRET       — random 64-char string, MUST be changed
+#   ADMIN_PASSWORD   — initial admin password, change after first login
+#
+# Example .env:
+#   JWT_SECRET=<openssl rand -hex 32>
+#   ADMIN_PASSWORD=SuperSecret123
+
+services:
+  cellquant:
+    build:
+      context: ./cellquant-v3
+      dockerfile: Dockerfile
+      # Torch/CUDA wheels staged on the Docker host (exact set: cellquant-v3/scripts/torch-wheels.constraints.txt).
+      # Downloads inside the build container run ~800x slower than on the host,
+      # so they are installed offline from this named context.
+      additional_contexts:
+        wheels: /var/tmp/cqwheels
+    image: cellquant:3
+    container_name: cellquant
+    restart: always
+    # Host networking, not a bridge: the Explorer folder picker runs on the
+    # Windows host and binds loopback. Under WSL2 mirrored networking the host
+    # namespace is shared with Windows, so host mode is the only way the
+    # backend can call the picker back for /browse. uvicorn binds 7860
+    # directly, so no port mapping is needed (or allowed) here.
+    network_mode: host
+    volumes:
+      # Persistent DB + analysis output
+      - cellquant_data:/data
+      # Mount the full D: drive so native Windows-picked paths can be translated.
+      # Native Docker Engine under WSL2: D: is visible at /mnt/d, not D:/
+      # (D:/ is Docker Desktop syntax). Container-side path must stay
+      # /mnt/host/d — see _resolve_container_path in api/routers/experiments.py.
+      - /mnt/d:/mnt/host/d:rw
+    # GPU access for Cellpose — without this the CUDA build silently runs on CPU.
+    # Requires the NVIDIA Container Toolkit on the Docker host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - CELLQUANT_DB=/data/cellquant.db
+      - CELLQUANT_ADMIN_USER=admin
+      # No defaults: compose refuses to start if these are unset, so the stack
+      # can never boot with a publicly-known secret. Set them in .env.
+      - CELLQUANT_ADMIN_PASS=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set (see .env.example)}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (see .env.example)}
+      - JWT_EXPIRE_MINUTES=480
+    # Under host networking the host IS this namespace, so the name that
+    # /browse tries first must resolve to loopback rather than a bridge gateway.
+    extra_hosts:
+      - "host.docker.internal:127.0.0.1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  cellquant_data:
+    driver: local

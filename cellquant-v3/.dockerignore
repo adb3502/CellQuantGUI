@@ -1,0 +1,24 @@
+# Staged torch/CUDA wheels: read via a BuildKit bind mount, never as context.
+# Over 1GB, and the build context comes off the slow /mnt/d Windows filesystem.
+wheels/
+
+# Dependencies and build output — reinstalled/rebuilt inside the image.
+frontend/node_modules/
+frontend/build/
+frontend/.svelte-kit/
+**/__pycache__/
+**/*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# VCS and local tooling
+.git/
+.gitignore
+.claude/
+
+# Local data and artifacts that must not leak into the image
+data/
+*.db
+*.sqlite3
+.env

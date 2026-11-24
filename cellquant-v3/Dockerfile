@@ -16,9 +16,10 @@ RUN npm run build
 # ══════════════════════════════════════════════════════════════════
 FROM python:3.12-slim
 
-# System libraries required by scientific stack
+# System libraries required by scientific stack.
+# git is needed to pip-install Cellpose from its GitHub revision (below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc g++ libglib2.0-0 libgl1 libgomp1 \
+        gcc g++ git libglib2.0-0 libgl1 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for security (with home directory for session cache)
@@ -37,6 +38,24 @@ RUN pip install --no-cache-dir \
         "aiosqlite>=0.20" "bcrypt>=4.0" "python-jose[cryptography]>=3.3" "httpx>=0.27" \
         "numpy>=1.24" "pandas>=2.1" "pyarrow>=14.0" \
         "tifffile>=2024.1" "scikit-image>=0.22" "scipy>=1.12" "Pillow>=10.2"
+
+# PyTorch (CUDA 13.0 — matches host GPU driver)
+# Downloads from inside the build container run at ~23KB/s while the same files
+# pull at ~18MB/s on the host, so the >1GB of torch/CUDA wheels are staged
+# beforehand into /var/tmp/cqwheels on the Docker host and installed offline
+# from a mount. The exact wheel set is pinned in
+# scripts/torch-wheels.constraints.txt. It was staged by hand; there is no
+# verified re-fetch script yet.
+# BuildKit exposes the staged directory read-only at /wheels.
+# The full dependency tree (32 wheels, ~2.9GB incl. all nvidia-* CUDA libs) is
+# staged on the host, so this resolves entirely offline.
+RUN --mount=type=bind,from=wheels,target=/wheels,ro \
+    pip install --no-cache-dir --no-index --find-links /wheels \
+        torch torchvision
+
+# Cellpose (latest from git, matching .venv)
+RUN pip install --no-cache-dir \
+        "git+https://github.com/mouseland/cellpose.git@6d23968d924fc3b8e419a2d79349888f4b07aa29"
 
 # Copy source + frontend (before install so static files are baked in)
 COPY README.md ./
