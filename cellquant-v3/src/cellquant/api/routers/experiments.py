@@ -5,7 +5,7 @@ import re
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cellquant.api.dependencies import get_session_manager, get_session
 from cellquant.auth.middleware import CurrentUser, get_current_user
@@ -147,16 +147,38 @@ def _summarise_folder_data_type(folder):
     # headers would slow the scan for no extra information.
     return summarise_data_types([probe_file(f) for f in files[:12]])
 
+def _is_loopback(request: Request) -> bool:
+    import ipaddress
+
+    host = request.client.host if request.client else None
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 @router.post("/picker-register")
-async def picker_register(req: dict) -> dict:
+async def picker_register(req: dict, request: Request) -> dict:
     """Called by cellquant-picker.py on startup to register its port.
 
     Body: { "username": "adb", "port": 7863 }
-    No auth required — only reachable from the host machine.
+
+    No login, so it is restricted to the local machine instead. The server
+    listens on 0.0.0.0 with host networking, so without this check any
+    machine on the network could register a port under any username, and
+    /browse would POST to it and hand that user whatever "folder" it
+    returned. The picker runs on this host and registers from 127.0.0.1.
     """
-    username = req.get("username", "").strip().lower()
-    port = int(req.get("port", 0))
-    if username and port:
+    if not _is_loopback(request):
+        raise HTTPException(403, "Picker registration is only accepted from this machine")
+    username = str(req.get("username", "")).strip().lower()
+    try:
+        port = int(req.get("port", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "port must be an integer")
+    if username and 0 < port < 65536:
         _picker_registry[username] = port
     return {"ok": True}
 
