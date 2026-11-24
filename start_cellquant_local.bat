@@ -9,7 +9,7 @@ echo.
 set ROOT=%~dp0
 set VENV=%ROOT%.venv
 set PYTHON=%VENV%\Scripts\python.exe
-set PICKER=%ROOT%cellquant-picker.py
+set PICKER=%ROOT%cellquant-v3\cellquant-picker.py
 set APP_ROOT=%ROOT%cellquant-v3
 set FRONTEND_BUILD=%APP_ROOT%\frontend\build
 set STATIC_DIR=%APP_ROOT%\src\cellquant\static

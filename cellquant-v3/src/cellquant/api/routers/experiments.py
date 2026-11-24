@@ -128,6 +128,11 @@ def _resolve_container_path(raw_path: str | None) -> Path | None:
 # Registry: username -> picker port (populated by the picker agent on startup)
 _picker_registry: dict[str, int] = {}
 
+# The picker agent refuses /pick without this header, so web pages in the
+# user's browser cannot trigger it. Must match PICKER_HEADER in
+# cellquant-picker.py.
+PICKER_HEADER = "X-CellQuant-Picker"
+
 
 
 def _summarise_folder_data_type(folder):
@@ -216,7 +221,8 @@ async def browse_folder(
     async with httpx.AsyncClient(timeout=120.0) as client:
         for host in hosts:
             try:
-                resp = await client.post(f"http://{host}:{registered_port}/pick")
+                resp = await client.post(f"http://{host}:{registered_port}/pick",
+                                         headers={PICKER_HEADER: "1"})
                 resp.raise_for_status()
                 return {"path": resp.json().get("path")}
             except Exception:

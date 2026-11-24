@@ -7,7 +7,7 @@ echo.
 
 REM Start the Windows folder-picker agent in a hidden background window
 echo [1/2] Starting folder-picker agent on port 7861...
-start "CellQuant Picker" /min cmd /c "set CELLQUANT_PICKER_PORT=7861 && python \"%~dp0cellquant-picker.py\""
+start "CellQuant Picker" /min cmd /c "set CELLQUANT_PICKER_PORT=7861 && python \"%~dp0cellquant-v3\cellquant-picker.py\""
 timeout /t 1 /nobreak >nul
 
 REM Start Docker service

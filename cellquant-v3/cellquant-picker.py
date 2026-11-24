@@ -37,6 +37,14 @@ except ImportError:
 
 
 DEFAULT_PORT = 0  # 0 = auto-assign a free port
+
+# Sent by the CellQuant backend on every /pick. A web page in the user's
+# browser can POST to localhost without a CORS preflight, so an unguarded
+# /pick would let any site pop folder dialogs on this screen. Browsers
+# cannot add a custom header cross-site unless a preflight is approved, and
+# this agent approves none. Must match PICKER_HEADER in
+# cellquant/api/routers/experiments.py.
+PICKER_HEADER = "X-CellQuant-Picker"
 BACKEND_URL = os.environ.get("CELLQUANT_BACKEND", "http://localhost:7860")
 
 
@@ -55,6 +63,10 @@ class PickerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/pick":
+            if self.headers.get(PICKER_HEADER) != "1":
+                self.send_response(403)
+                self.end_headers()
+                return
             path = pick_folder()
             body = json.dumps({"path": path}).encode()
             self.send_response(200)

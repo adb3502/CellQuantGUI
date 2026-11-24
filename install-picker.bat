@@ -3,7 +3,7 @@
 :: Run this once as Administrator from the CellQuantGUI folder.
 
 set SCRIPT_DIR=%~dp0
-set PICKER=%SCRIPT_DIR%cellquant-picker.py
+set PICKER=%SCRIPT_DIR%cellquant-v3\cellquant-picker.py
 
 :: Resolve the real Python install, not the Windows Store app alias.
 for /f "delims=" %%i in ('powershell -NoProfile -Command "$py=(Get-Command python -ErrorAction SilentlyContinue).Source; if($py){$dir=Split-Path $py; $pyw=Join-Path $dir ''pythonw.exe''; if(Test-Path $pyw){$pyw}else{$py}}"') do set PYTHONW=%%i
